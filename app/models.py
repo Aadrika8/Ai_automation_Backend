@@ -148,3 +148,20 @@ class ManagedUser(CamelModel):
     name: str
     role: Role
     last_active: str
+
+
+class ReportIssue(CamelModel):
+    title: str
+    affected_tests: int
+    likely_causes: list[str]
+    suggested_fixes: list[str]
+
+
+class AiReport(CamelModel):
+    summary: str
+    health_assessment: str
+    top_issues: list[ReportIssue]
+    recommendations: list[str]
+    generated_at: str
+    model: str
+    cached: bool

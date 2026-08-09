@@ -87,9 +87,19 @@ Interactive docs at `/docs` (OpenAPI). All routes under `/api`, JWT Bearer auth:
 | `POST /api/auth/login` → `{token, user}` | public |
 | `GET /api/apps`, `…/layers`, `…/dashboard`, `GET/…settings` | any authenticated |
 | `GET …/tests`, `/api/tests/{id}`, `/api/runs` | qa + admin |
+| `POST …/layers/{layer}/report` — AI quality report | qa + admin |
 | `PUT /api/settings`, `GET /api/users` | admin |
 
 Demo accounts: `admin/admin123`, `qa/qa123`, `manager/manager123`.
+
+### AI reports
+
+`POST /api/apps/{app}/layers/{layer}/report` summarizes the layer (health, failure
+groups with likely causes and suggested fixes) via OpenAI. Set `OPENAI_API_KEY` in
+`.env` (503 while empty; model defaults to `gpt-4o-mini` via `OPENAI_MODEL`). Credits
+are protected: the prompt only carries aggregates + truncated sample stack traces, and
+results are cached in the `reports` collection by data hash — an unchanged layer never
+triggers a second OpenAI call (`?force=true` to override).
 
 ## Tests
 
