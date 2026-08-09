@@ -82,3 +82,19 @@ async def put_settings_doc(doc: dict) -> None:
 
 async def list_users() -> list[dict]:
     return await get_db().users.find(projection={"_id": 0, "passwordHash": 0}).to_list(None)
+
+
+async def list_failed_tests(app_id: str, layer_id: str) -> list[dict]:
+    return await get_db().tests.find(
+        {"appId": app_id, "layerId": layer_id, "status": "Failed"},
+        projection={"name": 1, "suite": 1, "history": 1, "failure": 1},
+    ).to_list(None)
+
+
+async def get_cached_report(app_id: str, layer_id: str) -> dict | None:
+    return await get_db().reports.find_one({"_id": f"{app_id}:{layer_id}"})
+
+
+async def put_cached_report(app_id: str, layer_id: str, doc: dict) -> None:
+    key = f"{app_id}:{layer_id}"
+    await get_db().reports.replace_one({"_id": key}, {"_id": key, **doc}, upsert=True)

@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     jwt_secret: str = PLACEHOLDER_SECRET
     jwt_expires_min: int = 1440
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:5199"]
+    openai_api_key: str = ""  # empty -> report endpoint returns 503
+    openai_model: str = "gpt-4o-mini"
 
 
 @lru_cache
