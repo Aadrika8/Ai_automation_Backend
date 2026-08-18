@@ -1,17 +1,15 @@
 """Response/request models — field-for-field mirror of Frontend/src/api/types.ts.
 Snake_case fields with camelCase aliases; FastAPI serializes by alias, so the
 wire format matches the frontend exactly."""
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-AppId = Literal["hrms", "cellsens", "preciv"]
-LayerId = Literal["unit", "integration", "system", "e2e"]
 Role = Literal["manager", "qa", "admin"]
-RunStatus = Literal["Completed", "Running", "Failed"]
-TestStatus = Literal["Passed", "Failed", "Running", "Skipped"]
-AppIcon = Literal["people", "scope", "ruler"]
+
+Cell = str | int | float | None
 
 
 class CamelModel(BaseModel):
@@ -34,103 +32,114 @@ class LoginResponse(CamelModel):
     user: User
 
 
+class ColumnDef(CamelModel):
+    key: str  # sanitized: "test_count"
+    label: str  # original: "Test Count"
+    type: Literal["string", "number"]
+
+
 class AppSummary(CamelModel):
-    id: AppId
+    id: str
     name: str
-    tag: str
-    desc: str
-    icon: AppIcon
-    total_tests: int
-    pass_rate: float
+    tag: str = ""
+    desc: str = ""
+    icon: str = "scope"
+    layer_count: int = 0
+    record_count: int = 0
+
+
+class AppCreate(CamelModel):
+    name: str = Field(min_length=1, max_length=80)
+    tag: str = ""
+    desc: str = ""
+    icon: str = "scope"
+
+
+class AppUpdate(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    tag: str | None = None
+    desc: str | None = None
+    icon: str | None = None
 
 
 class LayerInfo(CamelModel):
-    id: LayerId
-    name: str
-    short: str
-    share: float
-    desc: str
-    color_var: str
-    test_count: int
-    pass_rate: float
-
-
-class LayerSnapshot(CamelModel):
-    total: int
-    passed: int
-    failed: int
-    known_bugs: int
-    running: int
-    skipped: int
-    pass_rate: float
-    delta_vs_last_week: float
-
-
-class HistoryPoint(CamelModel):
-    days_ago: int
-    pass_rate: float
-    runs: int
-
-
-class HourPoint(CamelModel):
-    hours_ago: int
-    pass_rate: float
-    runs: int
-
-
-class SuiteVersion(CamelModel):
-    current: str
-    last_updated: str
-
-
-class RunSummary(CamelModel):
-    id: str
-    app_id: AppId
-    layer_id: LayerId
-    name: str
-    when: str
-    total: int
-    passed: int
-    duration_min: int
-    status: RunStatus
-
-
-class LayerDashboard(CamelModel):
-    snapshot: LayerSnapshot
-    history: list[HistoryPoint]
-    hourly: list[HourPoint]
-    version: SuiteVersion
-    recent_runs: list[RunSummary]
-
-
-class TestCaseRow(CamelModel):
     id: str
     name: str
-    suite: str
-    release: str
-    status: TestStatus
-    duration_s: float
-    last_run: str
+    short: str = ""
+    desc: str = ""
+    order: int = 0
+    record_count: int = 0
+    last_upload_at: datetime | None = None
+    last_upload_file: str | None = None
 
 
-class TestRunRecord(CamelModel):
-    when: str
-    status: TestStatus
-    duration_s: float
+class LayerCreate(CamelModel):
+    name: str = Field(min_length=1, max_length=80)
+    short: str = ""
+    desc: str = ""
 
 
-class TestFailureDetail(CamelModel):
-    error_message: str
-    failing_step: str
-    stack_trace: str
+class LayerUpdate(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    short: str | None = None
+    desc: str | None = None
+    order: int | None = None
 
 
-class TestDetail(TestCaseRow):
-    app_id: AppId
-    layer_id: LayerId
-    path: str
-    history: list[TestRunRecord]
-    failure: TestFailureDetail | None = None
+class UploadResult(CamelModel):
+    upload_id: str
+    file_name: str
+    columns: list[ColumnDef]
+    sections: list[str]
+    total_rows: int
+    inserted: int
+    updated: int
+    unchanged: int
+    duplicates_skipped: int
+    uploaded_by: str
+    uploaded_at: datetime
+
+
+class RecordRow(CamelModel):
+    section: str
+    data: dict[str, Cell]
+
+
+class SectionGroup(CamelModel):
+    name: str
+    row_count: int
+    rows: list[RecordRow]
+
+
+class LayerRecordsResponse(CamelModel):
+    columns: list[ColumnDef]
+    last_upload: UploadResult | None = None
+    total: int
+    page: int
+    page_size: int
+    sections: list[SectionGroup]
+
+
+class SectionAggregate(CamelModel):
+    section: str
+    row_count: int
+    sums: dict[str, float]
+
+
+class TopRow(CamelModel):
+    section: str
+    label: str
+    value: float
+
+
+class LayerDashboardResponse(CamelModel):
+    last_upload: UploadResult | None = None
+    total_rows: int
+    section_count: int
+    numeric_columns: list[ColumnDef]
+    totals: dict[str, float]
+    by_section: list[SectionAggregate]
+    top_rows: list[TopRow]
 
 
 class AppSettings(CamelModel):
@@ -147,21 +156,11 @@ class ManagedUser(CamelModel):
     username: str
     name: str
     role: Role
-    last_active: str
+    last_active: datetime | None = None
 
 
-class ReportIssue(CamelModel):
-    title: str
-    affected_tests: int
-    likely_causes: list[str]
-    suggested_fixes: list[str]
-
-
-class AiReport(CamelModel):
-    summary: str
-    health_assessment: str
-    top_issues: list[ReportIssue]
-    recommendations: list[str]
-    generated_at: str
-    model: str
-    cached: bool
+class UserCreate(CamelModel):
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    name: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=6, max_length=128)
+    role: Role

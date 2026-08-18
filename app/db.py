@@ -1,5 +1,5 @@
 """Async MongoDB client lifecycle. Connected in the FastAPI lifespan."""
-from pymongo import ASCENDING, AsyncMongoClient
+from pymongo import ASCENDING, DESCENDING, AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 
 from app.config import get_settings
@@ -9,7 +9,9 @@ _client: AsyncMongoClient | None = None
 
 async def connect() -> None:
     global _client
-    _client = AsyncMongoClient(get_settings().mongo_uri)
+    # tz_aware so datetimes round-trip as UTC and serialize with an offset,
+    # instead of naive strings the browser would parse as local time
+    _client = AsyncMongoClient(get_settings().mongo_uri, tz_aware=True)
     await _client.admin.command("ping")
     await ensure_indexes(get_db())
 
@@ -21,8 +23,17 @@ async def ensure_indexes(db: AsyncDatabase) -> None:
     without depending on the demo seed script.
     """
     await db.users.create_index("username", unique=True)
-    await db.layers.create_index("appId")
-    await db.tests.create_index([("appId", ASCENDING), ("layerId", ASCENDING)])
+    await db.layers.create_index([("appId", ASCENDING), ("order", ASCENDING)])
+    # unique rowKey per layer is the DB-level duplicate guarantee for uploads
+    await db.layer_records.create_index(
+        [("appId", ASCENDING), ("layerId", ASCENDING), ("rowKey", ASCENDING)], unique=True
+    )
+    await db.layer_records.create_index(
+        [("appId", ASCENDING), ("layerId", ASCENDING), ("section", ASCENDING), ("rowIndex", ASCENDING)]
+    )
+    await db.layer_uploads.create_index(
+        [("appId", ASCENDING), ("layerId", ASCENDING), ("uploadedAt", DESCENDING)]
+    )
 
 
 async def close() -> None:

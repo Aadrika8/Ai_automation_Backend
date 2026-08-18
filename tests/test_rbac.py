@@ -2,14 +2,36 @@ import pytest
 
 PROTECTED = [
     ("GET", "/api/apps"),
-    ("GET", "/api/apps/hrms/layers"),
-    ("GET", "/api/apps/hrms/layers/unit/dashboard"),
-    ("GET", "/api/apps/hrms/layers/unit/tests"),
-    ("GET", "/api/tests/hrms~unit~0"),
-    ("GET", "/api/runs"),
+    ("POST", "/api/apps"),
+    ("PATCH", "/api/apps/cellsens"),
+    ("DELETE", "/api/apps/cellsens"),
+    ("GET", "/api/apps/cellsens/layers"),
+    ("POST", "/api/apps/cellsens/layers"),
+    ("PATCH", "/api/apps/cellsens/layers/regression"),
+    ("DELETE", "/api/apps/cellsens/layers/regression"),
+    ("POST", "/api/apps/cellsens/layers/regression/uploads"),
+    ("GET", "/api/apps/cellsens/layers/regression/records"),
+    ("DELETE", "/api/apps/cellsens/layers/regression/records"),
+    ("GET", "/api/apps/cellsens/layers/regression/dashboard"),
     ("GET", "/api/settings"),
     ("PUT", "/api/settings"),
     ("GET", "/api/users"),
+    ("POST", "/api/users"),
+    ("DELETE", "/api/users/qa2"),
+]
+
+ADMIN_ONLY = [
+    ("POST", "/api/apps"),
+    ("PATCH", "/api/apps/cellsens"),
+    ("DELETE", "/api/apps/cellsens"),
+    ("POST", "/api/apps/cellsens/layers"),
+    ("PATCH", "/api/apps/cellsens/layers/regression"),
+    ("DELETE", "/api/apps/cellsens/layers/regression"),
+    ("DELETE", "/api/apps/cellsens/layers/regression/records"),
+    ("GET", "/api/users"),
+    ("POST", "/api/users"),
+    ("DELETE", "/api/users/qa2"),
+    ("PUT", "/api/settings"),
 ]
 
 
@@ -19,27 +41,30 @@ async def test_all_routes_require_auth(client, method, path):
     assert res.status_code == 401
 
 
-async def test_manager_blocked_from_qa_and_admin_routes(client, manager_headers):
-    for path in ("/api/runs", "/api/apps/hrms/layers/unit/tests", "/api/tests/hrms~unit~0", "/api/users"):
-        res = await client.get(path, headers=manager_headers)
-        assert res.status_code == 403, path
-    res = await client.put("/api/settings", headers=manager_headers, json={})
-    assert res.status_code == 403
-
-
-async def test_manager_allowed_dashboard_flow(client, manager_headers):
-    for path in ("/api/apps", "/api/apps/hrms/layers", "/api/apps/hrms/layers/unit/dashboard", "/api/settings"):
+async def test_manager_read_only(client, manager_headers):
+    for path in ("/api/apps", "/api/apps/cellsens/layers",
+                 "/api/apps/cellsens/layers/regression/records",
+                 "/api/apps/cellsens/layers/regression/dashboard", "/api/settings"):
         res = await client.get(path, headers=manager_headers)
         assert res.status_code == 200, path
+    res = await client.post("/api/apps/cellsens/layers/regression/uploads",
+                            headers=manager_headers,
+                            files={"file": ("x.xlsx", b"x", "application/octet-stream")})
+    assert res.status_code == 403
+    for method, path in ADMIN_ONLY:
+        res = await client.request(method, path, headers=manager_headers, json={})
+        assert res.status_code == 403, f"{method} {path}"
 
 
-async def test_qa_allowed_drilldown_blocked_from_admin(client, qa_headers):
-    for path in ("/api/runs", "/api/apps/hrms/layers/unit/tests"):
-        assert (await client.get(path, headers=qa_headers)).status_code == 200
-    assert (await client.get("/api/users", headers=qa_headers)).status_code == 403
-    assert (await client.put("/api/settings", headers=qa_headers, json={})).status_code == 403
+async def test_qa_can_upload_but_not_administer(client, qa_headers):
+    for method, path in ADMIN_ONLY:
+        res = await client.request(method, path, headers=qa_headers, json={})
+        assert res.status_code == 403, f"{method} {path}"
 
 
 async def test_admin_allowed_everything(client, admin_headers):
-    for path in ("/api/apps", "/api/runs", "/api/apps/hrms/layers/unit/tests", "/api/users", "/api/settings"):
+    for path in ("/api/apps", "/api/apps/cellsens/layers",
+                 "/api/apps/cellsens/layers/regression/records",
+                 "/api/apps/cellsens/layers/regression/dashboard",
+                 "/api/users", "/api/settings"):
         assert (await client.get(path, headers=admin_headers)).status_code == 200, path
