@@ -9,15 +9,13 @@ PLACEHOLDER_SECRET = "dev-only-secret-change-in-production"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     mongo_uri: str = "mongodb://127.0.0.1:27017"
     mongo_db: str = "quality_insights"
     jwt_secret: str = PLACEHOLDER_SECRET
     jwt_expires_min: int = 1440
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:5199"]
-    openai_api_key: str = ""  # empty -> report endpoint returns 503
-    openai_model: str = "gpt-4o-mini"
 
 
 @lru_cache
