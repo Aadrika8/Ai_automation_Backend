@@ -44,6 +44,8 @@ class AppSummary(CamelModel):
     tag: str = ""
     desc: str = ""
     icon: str = "scope"
+    # folder holding this application's workbooks, relative to settings.excelRoot
+    excel_path: str = ""
     layer_count: int = 0
     record_count: int = 0
 
@@ -53,6 +55,7 @@ class AppCreate(CamelModel):
     tag: str = ""
     desc: str = ""
     icon: str = "scope"
+    excel_path: str = Field(default="", max_length=400)
 
 
 class AppUpdate(CamelModel):
@@ -60,6 +63,7 @@ class AppUpdate(CamelModel):
     tag: str | None = None
     desc: str | None = None
     icon: str | None = None
+    excel_path: str | None = Field(default=None, max_length=400)
 
 
 class LayerInfo(CamelModel):
@@ -77,6 +81,9 @@ class LayerCreate(CamelModel):
     name: str = Field(min_length=1, max_length=80)
     short: str = ""
     desc: str = ""
+    # Pyramid position, bottom-first: 0 puts the new layer at the base (most
+    # test cases). Omitted/out-of-range values append it to the tip.
+    order: int | None = Field(default=None, ge=0)
 
 
 class LayerUpdate(CamelModel):
@@ -142,7 +149,73 @@ class LayerDashboardResponse(CamelModel):
     top_rows: list[TopRow]
 
 
+class SourceFileInfo(CamelModel):
+    name: str
+    relative_path: str
+    size_bytes: int
+    modified_at: datetime
+    layer_id: str | None = None
+    changed: bool = False
+    error: str | None = None
+
+
+class LayerSource(CamelModel):
+    layer_id: str
+    layer_name: str
+    files: list[SourceFileInfo] = []
+    # more than one workbook maps here: ask before merging or picking one
+    conflict: bool = False
+    changed: bool = False
+    last_synced_at: datetime | None = None
+    last_synced_file: str | None = None
+
+
+class SourceStatus(CamelModel):
+    root: str = ""
+    relative_path: str = ""
+    resolved_path: str = ""
+    ok: bool
+    error_code: str | None = None
+    error: str | None = None
+    layers: list[LayerSource] = []
+    # workbooks whose name matches no layer — surfaced, never silently dropped
+    unmatched_files: list[SourceFileInfo] = []
+    changed_count: int = 0
+
+
+class SyncLayerChoice(CamelModel):
+    layer_id: str
+    # relative paths chosen for this layer; several means "merge them"
+    files: list[str] = []
+
+
+class SyncRequest(CamelModel):
+    mode: Literal["merge", "replace"] = "merge"
+    # omitted -> every layer with exactly one matched workbook
+    layers: list[SyncLayerChoice] | None = None
+
+
+class SyncLayerResult(CamelModel):
+    layer_id: str
+    layer_name: str
+    files: list[str] = []
+    total_rows: int = 0
+    inserted: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    duplicates_skipped: int = 0
+    error: str | None = None
+
+
+class SyncResult(CamelModel):
+    synced_at: datetime
+    mode: Literal["merge", "replace"]
+    layers: list[SyncLayerResult] = []
+
+
 class AppSettings(CamelModel):
+    # parent folder holding one sub-folder per application
+    excel_root: str = ""
     repo_url: str
     branch: str
     cache_dir: str

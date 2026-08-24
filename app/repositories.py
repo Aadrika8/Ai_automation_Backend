@@ -3,6 +3,8 @@ so repositories only reshape ids and project fields."""
 import re
 from datetime import datetime, timezone
 
+from pymongo import UpdateOne
+
 from app.db import get_db
 
 
@@ -94,6 +96,24 @@ async def create_layer(doc: dict) -> None:
     await get_db().layers.insert_one(doc)
 
 
+async def create_layers(docs: list[dict]) -> None:
+    """Insert several layers at once — used to lay down an application's defaults."""
+    if docs:
+        await get_db().layers.insert_many(docs)
+
+
+async def set_layer_orders(app_id: str, orders: dict[str, int]) -> None:
+    """Renumber layers in one round trip. Used when a layer is inserted into
+    the middle of the pyramid and everything above it shifts up a slot."""
+    if not orders:
+        return
+    now = _now()
+    await get_db().layers.bulk_write([
+        UpdateOne({"_id": f"{app_id}:{layer_id}"}, {"$set": {"order": order, "updatedAt": now}})
+        for layer_id, order in orders.items()
+    ])
+
+
 async def update_layer(app_id: str, layer_id: str, patch: dict) -> None:
     await get_db().layers.update_one(
         {"_id": f"{app_id}:{layer_id}"}, {"$set": {**patch, "updatedAt": _now()}}
@@ -108,6 +128,20 @@ async def delete_layer_cascade(app_id: str, layer_id: str) -> None:
 
 
 # --- uploads / records --------------------------------------------------
+
+
+async def get_layer_file_hashes(app_id: str, layer_id: str) -> dict[str, str]:
+    """Latest ingested fingerprint per source workbook, keyed by absolute path.
+
+    Keyed per file rather than per layer so a layer fed by several workbooks
+    reports only the ones that actually changed.
+    """
+    docs = await get_db().layer_uploads.find(
+        {"appId": app_id, "layerId": layer_id},
+        projection={"sourcePath": 1, "fileHash": 1, "uploadedAt": 1},
+    ).sort("uploadedAt", 1).to_list(None)
+    return {d["sourcePath"]: d.get("fileHash", "")
+            for d in docs if d.get("sourcePath")}  # later uploads win
 
 
 async def get_latest_upload(app_id: str, layer_id: str) -> dict | None:
