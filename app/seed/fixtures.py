@@ -1,5 +1,7 @@
-"""Static seed fixtures: login users, the cellSens application and its four
-testing layers. No test data is seeded — records arrive via Excel upload."""
+"""Static seed fixtures: login users, the cellSens application and default
+settings. Testing layers are not defined here — every application gets the
+global pyramid from `app.layer_defaults`. No test data is seeded either;
+records arrive via Excel upload."""
 
 USERS = [
     {"username": "admin", "password": "admin123", "name": "Aadrika Sharma", "role": "admin"},
@@ -16,21 +18,15 @@ APPS = [
         "tag": "Imaging & Microscopy",
         "desc": "Life-science imaging software for microscope control, acquisition and analysis.",
         "icon": "scope",
+        # folder under settings.excelRoot holding this app's layer workbooks
+        "excelPath": "cellsens",
     },
 ]
 
-LAYERS = [
-    {"layerId": "regression", "name": "Regression testing", "short": "REG", "order": 0,
-     "desc": "Full regression sweep across cameras, microscopes and core workflows."},
-    {"layerId": "system", "name": "System testing", "short": "SYS", "order": 1,
-     "desc": "End-to-end verification of the integrated system against requirements."},
-    {"layerId": "feature", "name": "Feature testing", "short": "FEAT", "order": 2,
-     "desc": "Focused verification of new and changed features per release."},
-    {"layerId": "acceptance", "name": "Acceptance testing", "short": "UAT", "order": 3,
-     "desc": "Customer-facing acceptance criteria and sign-off scenarios."},
-]
-
 DEFAULT_SETTINGS = {
+    # parent folder for the Excel catalog, e.g. r"A:\office excel files" or a
+    # UNC share. Empty by default: an admin sets it in Settings.
+    "excelRoot": "",
     "repoUrl": "https://github.com/Aadrika8/test_suites.git",
     "branch": "main",
     "cacheDir": "~/TestRunner/cache",
