@@ -1,22 +1,23 @@
-"""Path-based discovery of the Excel test catalog.
+r"""Path-based discovery of the Excel test catalog.
 
-Layout on disk — a configured parent folder, one sub-folder per application,
-one workbook per testing layer:
+There is one rule, and one configured value behind it:
 
-    <excelRoot>/                     e.g.  A:\\office excel files
-        cellsens/                    <- the application's relative path
-            feature.xlsx             <- layer matched from the file name
-            regression.xlsx
-        preciv/
-            unit/                    <- or a folder per layer, when a layer
-                part-a.xlsx             is split across several workbooks
-                part-b.xlsx
+    <excelRoot>\<application>\<release>\<layer>.xlsx
+
+`excelRoot` is set once, in Settings. The two folders under it are named after
+the application and the release as they read in the UI — cellSens\4.5.1 — so a
+release created in the app tells you exactly which folder to create on disk. A
+release whose folder is somewhere else carries its own relative path instead;
+that override is the only per-release configuration, and it is normally blank.
+
+Each release reads only its own folder, so a workbook that changes shape
+between releases — different columns, sections or size — is parsed fresh into
+that release and cannot disturb what an earlier release already holds.
 
 Nothing here parses cells: `excel_ingest.parse_workbook` still does that, on
-bytes read from disk instead of bytes read from an HTTP upload. This module
-answers the questions that come *before* parsing — is the path usable, which
-workbooks are there, which layer does each belong to, and has any of them
-changed since the last sync.
+bytes read from disk. This module answers the questions that come *before*
+parsing — is the path usable, which workbooks are there, which layer does each
+belong to, and has any of them changed since the last sync.
 
 Everything raises `SourceError` with a code and a message written for the
 person reading it, never a bare OSError.
@@ -33,7 +34,7 @@ EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
 TEMP_PREFIXES = ("~$", ".~")
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_FILES = 200
-MAX_DEPTH = 2  # <app>/file.xlsx and <app>/<layer>/file.xlsx
+MAX_DEPTH = 2  # <release>/file.xlsx and <release>/<layer>/file.xlsx
 
 
 class SourceError(Exception):
@@ -133,40 +134,64 @@ def resolve_root(root: str) -> Path:
     return resolved
 
 
-def resolve_app_folder(root: str, relative_path: str) -> Path:
-    """Resolve an application's folder beneath the root.
+# Characters Windows forbids in a file name, plus the separators we handle
+# ourselves. Applied when deriving a folder name from an application or
+# release name, so "4.5.1" stays "4.5.1" but "cellSens: R&D" cannot escape.
+_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
-    The relative path is confined to the root: an absolute path or one that
-    climbs out with `..` is rejected rather than silently followed.
+
+def folder_name(text: str) -> str:
+    """The folder a person would create for this application or release."""
+    name = _ILLEGAL.sub("-", str(text)).strip().rstrip(".")
+    return name or "unnamed"
+
+
+def default_folder(app: dict, release: dict) -> str:
+    """Where a release's workbooks live unless it says otherwise."""
+    return f'{folder_name(app.get("name") or app.get("_id", ""))}/' \
+           f'{folder_name(release.get("name") or release.get("releaseId", ""))}'
+
+
+def release_folder_path(app: dict, release: dict) -> str:
+    """The relative path for a release: its override, else the default."""
+    return (release.get("excelPath") or "").strip() or default_folder(app, release)
+
+
+def resolve_release_folder(root: str, relative_path: str) -> Path:
+    """Resolve one release's folder beneath the configured root.
+
+    The path is confined to the root: an absolute path, or one climbing out
+    with `..`, is rejected rather than followed.
     """
     root_dir = resolve_root(root)
     rel = (relative_path or "").strip().replace("\\", "/").strip("/")
     if not rel:
         raise SourceError(
-            "app_path_not_configured",
-            "No Excel folder is configured for this application. An admin can set it "
-            "on the application's layers page.")
+            "folder_not_configured",
+            "This release has no Excel folder. An admin can set one on the "
+            "application's layers page.")
     if PurePath(rel).is_absolute() or ".." in PurePath(rel).parts:
         raise SourceError(
-            "app_path_invalid",
-            "The application's Excel folder must be a relative path inside the root folder.")
+            "folder_invalid",
+            "The release's Excel folder must be a relative path inside the root folder.")
 
     target = (root_dir / rel).resolve()
     if target != root_dir and root_dir not in target.parents:
         raise SourceError(
-            "app_path_escapes_root",
-            "The application's Excel folder resolves outside the configured root folder.")
+            "folder_escapes_root",
+            "The release's Excel folder resolves outside the configured root folder.")
     if not target.exists():
         raise SourceError(
-            "app_folder_missing",
-            f"The application's Excel folder was not found: {target}")
+            "folder_missing",
+            f"No folder for this release at {target}. Create it, or point the "
+            f"release at the folder that holds its workbooks.")
     if not target.is_dir():
         raise SourceError(
-            "app_folder_not_a_directory",
-            f"The application's Excel path is a file, not a folder: {target}")
+            "folder_not_a_directory",
+            f"The release's Excel path is a file, not a folder: {target}")
     if not os.access(target, os.R_OK | os.X_OK):
         raise SourceError(
-            "app_folder_permission_denied",
+            "folder_permission_denied",
             f"The server does not have permission to read: {target}")
     return target
 
@@ -200,6 +225,11 @@ def read_workbook_bytes(path: Path) -> bytes:
 # --- discovery ----------------------------------------------------------
 
 
+def fingerprint_bytes(data: bytes) -> str:
+    """Fingerprint of content already in hand — what ingestion records."""
+    return hashlib.sha256(data).hexdigest()
+
+
 def fingerprint_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -208,13 +238,16 @@ def fingerprint_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def scan_app_folder(root: str, relative_path: str, layers: list[dict]) -> list[SourceFile]:
-    """List the workbooks under an application's folder, newest layout first.
+def scan_release_folder(root: str, relative_path: str,
+                        layers: list[dict]) -> list[SourceFile]:
+    """List the workbooks belonging to one release, matched to its layers.
 
-    Files that cannot be read are still returned, carrying `error`, so the UI
-    can show what is wrong with them instead of pretending they are absent.
+    Only that release's folder is read, so releases never see each other's
+    workbooks. Files that cannot be read are still returned, carrying `error`,
+    so the UI can show what is wrong with them instead of pretending they are
+    absent.
     """
-    folder = resolve_app_folder(root, relative_path)
+    folder = resolve_release_folder(root, relative_path)
     found: list[SourceFile] = []
 
     for path in sorted(folder.rglob("*")):
@@ -256,5 +289,6 @@ def scan_app_folder(root: str, relative_path: str, layers: list[dict]) -> list[S
     if not found:
         raise SourceError(
             "no_excel_files",
-            f"No Excel workbooks (.xlsx or .xlsm) were found in {folder}.")
+            f"No Excel workbooks (.xlsx or .xlsm) were found in {folder}. "
+            "Each release reads only its own folder.")
     return found

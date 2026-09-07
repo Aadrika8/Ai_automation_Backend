@@ -2,9 +2,14 @@
 
     python -m app.seed
 
-Seeds users, the cellSens application, the global default testing pyramid
+Seeds users, the cellSens application, its releases (v4.3 shipped, v4.4
+current), the global default testing pyramid inside each release
 (Unit → Regression → Feature → System → Acceptance, bottom-first) and default
-settings. Layer data is NOT seeded — it is ingested via Excel upload.
+settings. Layer data is NOT seeded — it is ingested per release via Excel
+upload or a folder sync.
+
+To keep the data already in a database, migrate it instead:
+`python -m app.migrate` moves a pre-release database onto this schema.
 Also drops the legacy fake-data collections (tests, runs, reports).
 """
 from datetime import datetime, timezone
@@ -15,13 +20,14 @@ from pymongo.synchronous.database import Database
 from app.config import get_settings
 from app.security import hash_password
 from app.layer_defaults import DEFAULT_LAYERS, default_layer_docs
-from app.seed.fixtures import APPS, DEFAULT_SETTINGS, USERS
+from app.seed.fixtures import APPS, DEFAULT_SETTINGS, RELEASES, USERS
 
 
 def seed_db(db: Database) -> dict:
     now = datetime.now(timezone.utc)
-    for name in ("users", "apps", "layers", "layer_uploads", "layer_records", "settings",
-                 "tests", "runs", "reports"):  # last three: legacy fake-data cleanup
+    for name in ("users", "apps", "releases", "layers", "snapshots", "layer_records",
+                 "settings", "layer_uploads", "tests", "runs",
+                 "reports"):  # last four: pre-snapshot collections
         db[name].drop()
 
     db.users.insert_many([
@@ -33,21 +39,33 @@ def seed_db(db: Database) -> dict:
         for u in USERS
     ])
     db.apps.insert_many([{**a, "createdAt": now, "updatedAt": now} for a in APPS])
-    # same defaults the API applies when an application is created
-    db.layers.insert_many([doc for a in APPS for doc in default_layer_docs(a["_id"], now)])
+    db.releases.insert_many([
+        {"_id": f'{r["appId"]}:{r["releaseId"]}', **r, "order": i,
+         "createdAt": now, "updatedAt": now}
+        for i, r in enumerate(RELEASES)
+    ])
+    # same defaults the API applies when a release is created
+    db.layers.insert_many([
+        doc for r in RELEASES
+        for doc in default_layer_docs(r["appId"], r["releaseId"], now)
+    ])
     db.settings.insert_one({"_id": "app", **DEFAULT_SETTINGS})
 
     # mirror of app.db.ensure_indexes so a seeded DB is ready without a boot
     db.users.create_index("username", unique=True)
-    db.layers.create_index([("appId", ASCENDING), ("order", ASCENDING)])
+    db.releases.create_index([("appId", ASCENDING), ("order", ASCENDING)])
+    db.layers.create_index(
+        [("appId", ASCENDING), ("releaseId", ASCENDING), ("order", ASCENDING)])
+    db.snapshots.create_index(
+        [("appId", ASCENDING), ("releaseId", ASCENDING), ("layerId", ASCENDING),
+         ("sequence", DESCENDING)])
     db.layer_records.create_index(
-        [("appId", ASCENDING), ("layerId", ASCENDING), ("rowKey", ASCENDING)], unique=True)
+        [("snapshotId", ASCENDING), ("rowKey", ASCENDING)], unique=True)
     db.layer_records.create_index(
-        [("appId", ASCENDING), ("layerId", ASCENDING), ("section", ASCENDING), ("rowIndex", ASCENDING)])
-    db.layer_uploads.create_index(
-        [("appId", ASCENDING), ("layerId", ASCENDING), ("uploadedAt", DESCENDING)])
+        [("snapshotId", ASCENDING), ("section", ASCENDING), ("rowIndex", ASCENDING)])
 
-    return {"apps": len(APPS), "layers": len(APPS) * len(DEFAULT_LAYERS),
+    return {"apps": len(APPS), "releases": len(RELEASES),
+            "layers": len(RELEASES) * len(DEFAULT_LAYERS),
             "users": len(USERS), "records": 0}
 
 
