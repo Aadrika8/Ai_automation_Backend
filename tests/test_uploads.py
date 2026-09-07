@@ -1,5 +1,15 @@
-"""Excel upload, merge semantics, records, dashboard and clearing."""
+"""Excel upload, merge semantics, records, dashboard and clearing.
+
+SKIPPED: browser upload is disabled — data is read from each release's folder
+instead (see tests/test_sync.py and tests/test_releases.py, which cover the
+same merge, replace, records and clearing semantics through that path). These
+tests are kept intact so they can be un-skipped along with the endpoint in
+app/routers/apps.py.
+"""
+import pytest
 import pytest_asyncio
+
+pytestmark = pytest.mark.skip(reason="browser upload is disabled; see app/routers/apps.py")
 
 from tests.helpers_xlsx import REAL_FILE, SIMPLE, build_workbook
 
@@ -8,9 +18,9 @@ def xlsx(payload: bytes, name: str = "data.xlsx"):
     return {"file": (name, payload, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
 
 
-UPLOAD = "/api/apps/cellsens/layers/system/uploads"
-RECORDS = "/api/apps/cellsens/layers/system/records"
-DASHBOARD = "/api/apps/cellsens/layers/system/dashboard"
+UPLOAD = "/api/apps/cellsens/releases/v4-4/layers/system/uploads"
+RECORDS = "/api/apps/cellsens/releases/v4-4/layers/system/records"
+DASHBOARD = "/api/apps/cellsens/releases/v4-4/layers/system/dashboard"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -146,9 +156,9 @@ async def test_upload_validation_errors(client, qa_headers):
     assert res.status_code == 400
     res = await client.post(UPLOAD, headers=qa_headers, files=xlsx(b"garbage bytes"))
     assert res.status_code == 400
-    res = await client.post("/api/apps/cellsens/layers/nope/uploads",
+    res = await client.post("/api/apps/cellsens/releases/v4-4/layers/nope/uploads",
                             headers=qa_headers, files=xlsx(build_workbook(SIMPLE)))
     assert res.status_code == 404
-    res = await client.post("/api/apps/UPPER/layers/x/uploads",
+    res = await client.post("/api/apps/UPPER/releases/v4-4/layers/x/uploads",
                             headers=qa_headers, files=xlsx(build_workbook(SIMPLE)))
     assert res.status_code == 422  # slug pattern rejects uppercase ids

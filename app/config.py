@@ -15,7 +15,16 @@ class Settings(BaseSettings):
     mongo_db: str = "quality_insights"
     jwt_secret: str = PLACEHOLDER_SECRET
     jwt_expires_min: int = 1440
-    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:5199"]
+    # Vite serves on 5173, but hops to the next free port when it is taken —
+    # a second dev server, or one left running. Allowing the ports it falls
+    # back to keeps a browser on 5174 from failing CORS preflight with an
+    # opaque 400. 5199 is the port the UI verification suite uses.
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:5199",
+    ]
 
 
 @lru_cache

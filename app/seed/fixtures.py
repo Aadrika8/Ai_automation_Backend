@@ -1,7 +1,7 @@
-"""Static seed fixtures: login users, the cellSens application and default
-settings. Testing layers are not defined here — every application gets the
-global pyramid from `app.layer_defaults`. No test data is seeded either;
-records arrive via Excel upload."""
+"""Static seed fixtures: login users, the cellSens application, its releases
+and default settings. Testing layers are not defined here — every release gets
+the global pyramid from `app.layer_defaults`. No test data is seeded either;
+records arrive via Excel upload or a folder sync."""
 
 USERS = [
     {"username": "admin", "password": "admin123", "name": "Aadrika Sharma", "role": "admin"},
@@ -18,8 +18,29 @@ APPS = [
         "tag": "Imaging & Microscopy",
         "desc": "Life-science imaging software for microscope control, acquisition and analysis.",
         "icon": "scope",
-        # folder under settings.excelRoot holding this app's layer workbooks
-        "excelPath": "cellsens",
+    },
+]
+
+# Releases roll roughly every six months and each keeps its own data forever,
+# so the seed lays down a shipped one and the one under test. `order` is the
+# list position: the last entry is the newest.
+RELEASES = [
+    {
+        "appId": "cellsens",
+        "releaseId": "v4-3",
+        "name": "v4.3",
+        "desc": "Shipped release — kept for historical comparison.",
+        # blank: the folder follows the names, <excelRoot>/cellSens/v4.3
+        "excelPath": "",
+        "current": False,
+    },
+    {
+        "appId": "cellsens",
+        "releaseId": "v4-4",
+        "name": "v4.4",
+        "desc": "Release currently under test.",
+        "excelPath": "",
+        "current": True,
     },
 ]
 
@@ -32,6 +53,6 @@ DEFAULT_SETTINGS = {
     "cacheDir": "~/TestRunner/cache",
     "timeoutSeconds": 60,
     "rootFolder": "test_suites",
-    "levels": ["application", "suite", "release"],
+    "levels": ["application", "release", "suite"],
     "extensions": [".py"],
 }
