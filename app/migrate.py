@@ -137,14 +137,21 @@ def fold_excel_paths(db: Database, apply: bool) -> list[str]:
     return log
 
 
-def import_snapshots(db: Database, apply: bool) -> list[str]:
+def import_snapshots(db: Database, apply: bool,
+                     releases: dict[str, str] | None = None) -> list[str]:
     """Attach rows that predate snapshots to one imported snapshot each.
 
     Read-only with respect to the values: rows are stamped with a snapshotId
     and a period, and nothing is removed. `layer_uploads` is left untouched —
     it is the only record of what was loaded before snapshots existed.
+
+    `releases` maps an application to the release its untagged rows are moving
+    into. It is what makes a dry run possible: the tagging step writes nothing
+    without `--apply`, so without this the rows would still have no release by
+    the time they reach here.
     """
     log: list[str] = []
+    releases = releases or {}
     orphans = db.layer_records.aggregate([
         {"$match": {"snapshotId": {"$exists": False}}},
         {"$group": {"_id": {"appId": "$appId", "releaseId": "$releaseId",
@@ -154,13 +161,29 @@ def import_snapshots(db: Database, apply: bool) -> list[str]:
     ])
     for group in orphans:
         key = group["_id"]
-        scope = {"appId": key["appId"], "releaseId": key["releaseId"],
-                 "layerId": key["layerId"]}
+        app_id, layer_id = key.get("appId"), key.get("layerId")
+        # Rows written before releases existed carry no releaseId until the
+        # tagging step in migrate_db sets one — and a dry run does not write, so
+        # in a dry run they arrive here still untagged. Mongo omits a missing
+        # field from a $group key entirely, so this has to be read with .get()
+        # and the release the rows are heading for resolved from the caller.
+        tagged = key.get("releaseId")
+        release_id = tagged or releases.get(app_id)
+        if not (app_id and layer_id and release_id):
+            log.append(f'{app_id}/{layer_id}: skipped {group["n"]} rows — they '
+                       f'belong to no application this database still has, so '
+                       f'there is no release to attach them to')
+            continue
+
+        resolved = {"appId": app_id, "releaseId": release_id, "layerId": layer_id}
+        # match the rows as they are *now*, which in a dry run is still untagged
+        scope = dict(resolved) if tagged else {
+            "appId": app_id, "layerId": layer_id, "releaseId": {"$exists": False}}
         rows = list(db.layer_records.find(scope).sort("rowIndex", 1))
         uploads = list(db.layer_uploads.find(scope).sort("uploadedAt", 1))
         newest = uploads[-1] if uploads else {}
-        layer = db.layers.find_one({"_id": f'{key["appId"]}:{key["releaseId"]}'
-                                           f':{key["layerId"]}'}) or {}
+        layer = db.layers.find_one(
+            {"_id": f"{app_id}:{release_id}:{layer_id}"}) or {}
         loaded_at = newest.get("uploadedAt") or datetime.now(timezone.utc)
         columns = newest.get("columns") or layer.get("columns") or []
         identity = [c["key"] for c in columns if c.get("type") == "string"] \
@@ -168,14 +191,14 @@ def import_snapshots(db: Database, apply: bool) -> list[str]:
 
         snapshot_id = uuid.uuid4().hex
         log.append(
-            f'{key["appId"]}/{key["releaseId"]}/{key["layerId"]}: '
+            f'{app_id}/{release_id}/{layer_id}: '
             f'{group["n"]} rows -> imported snapshot #1 '
             f'({loaded_at:%b %Y}), from {len(uploads)} earlier load(s)')
         if not apply:
             continue
 
         db.snapshots.insert_one({
-            "_id": snapshot_id, **scope,
+            "_id": snapshot_id, **resolved,
             "sequence": 1,
             "period": {"year": loaded_at.year, "month": loaded_at.month},
             "contentHash": _content_hash(columns, rows),
@@ -271,11 +294,17 @@ def migrate_db(db: Database, release_name: str, apply: bool) -> list[str]:
     log: list[str] = repair_legacy_users(db, apply)
     log += fold_excel_paths(db, apply)
 
+    # where each application's untagged rows are heading. Carried to
+    # import_snapshots because the tagging below only writes under --apply,
+    # so a dry run has to be told what it would have written.
+    targets: dict[str, str] = {}
+
     for app in db.apps.find():
         app_id = app["_id"]
         log.append(f"application {app_id}:")
 
         release_id, name = _target_release(db, app_id, release_name, now, apply, log)
+        targets[app_id] = release_id
 
         # layers: re-key <app>:<layer> -> <app>:<release>:<layer>. _id is
         # immutable, so the document is rewritten under its new key.
@@ -311,7 +340,7 @@ def migrate_db(db: Database, release_name: str, apply: bool) -> list[str]:
                     db[coll].drop_index(index_name)
     # rows first get their release, then the snapshot that release loaded them
     # in, and finally the one workbook that snapshot came from
-    log += import_snapshots(db, apply)
+    log += import_snapshots(db, apply, targets)
     log += assign_snapshot_files(db, apply)
 
     if apply:

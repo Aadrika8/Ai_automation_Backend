@@ -152,6 +152,61 @@ def test_the_whole_migration_runs_end_to_end(legacy_db):
     assert legacy_db.snapshots.count_documents({}) == 1
 
 
+# --- rows from before releases existed ------------------------------------
+# The oldest databases predate releases as well as snapshots, so their rows
+# carry neither. Mongo omits a missing field from a $group key entirely, and a
+# dry run writes nothing — so the release tagging has not happened by the time
+# the snapshot import reads them, and it has to cope.
+
+
+@pytest.fixture
+def pre_release_db(legacy_db):
+    """The same database with the releaseId stripped off every row, which is
+    how a database that predates releases actually looks."""
+    legacy_db.layer_records.update_many({}, {"$unset": {"releaseId": ""}})
+    legacy_db.layer_uploads.update_many({}, {"$unset": {"releaseId": ""}})
+    return legacy_db
+
+
+def test_a_dry_run_survives_rows_that_have_no_release_yet(pre_release_db):
+    """This crashed with KeyError: 'releaseId' — the dry run was unusable on
+    exactly the databases the migration exists for."""
+    log = migrate_db(pre_release_db, "Initial release", apply=False)
+    assert any("imported snapshot" in line for line in log)
+    assert pre_release_db.snapshots.count_documents({}) == 0   # still a dry run
+
+
+def test_the_dry_run_names_the_release_the_rows_will_move_into(pre_release_db):
+    log = migrate_db(pre_release_db, "Initial release", apply=False)
+    imported = next(line for line in log if "imported snapshot" in line)
+    assert "cellsens/v4-2/regression" in imported
+    assert "3 rows" in imported
+
+
+def test_applying_it_places_every_row(pre_release_db):
+    migrate_db(pre_release_db, "Initial release", apply=True)
+    rows = list(pre_release_db.layer_records.find())
+    assert len(rows) == 3
+    assert all(r["snapshotId"] for r in rows)
+    assert all(r["releaseId"] == "v4-2" for r in rows)
+    snapshot = pre_release_db.snapshots.find_one()
+    assert snapshot["releaseId"] == "v4-2" and snapshot["appId"] == "cellsens"
+
+
+def test_rows_belonging_to_no_application_are_skipped_not_crashed_on(legacy_db):
+    """An appId with no application document has no release to move into.
+    Reporting that beats failing the whole migration for everyone else."""
+    legacy_db.layer_records.insert_one({
+        "appId": "deleted-app", "layerId": "unit", "rowKey": "orphan",
+        "section": "General", "rowIndex": 0, "data": {"name": "x"}})
+    log = migrate_db(legacy_db, "Initial release", apply=True)
+    assert any("belong to no application" in line for line in log)
+    # the real rows still migrated
+    assert legacy_db.snapshots.count_documents({}) == 1
+    orphan = legacy_db.layer_records.find_one({"appId": "deleted-app"})
+    assert "snapshotId" not in orphan          # left exactly as it was
+
+
 def test_a_release_that_read_from_a_folder_keeps_its_exact_path(legacy_db):
     """The other branch: rows loaded from disk carry a sourcePath, so the
     folder that produced them is spelled out in full rather than guessed."""
