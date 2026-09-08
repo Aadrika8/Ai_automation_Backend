@@ -258,6 +258,128 @@ class TopRow(CamelModel):
     value: float
 
 
+class RunResultsSummary(CamelModel):
+    """What a results sheet said, and which of its columns said it."""
+    passed: float
+    failed: float
+    not_run: float
+    executed: float          # passed + failed — what the rate is taken over
+    total: float             # what was planned, from the sheet's own total column
+    pass_rate_pct: float | None
+    executed_pct: float | None
+    basis_label: str
+    # false when the sheet's own total disagrees with passed + failed + not-run
+    reconciles: bool = True
+    unaccounted: float = 0.0
+    passed_column: str = ""
+    passed_label: str = ""
+    failed_column: str = ""
+    failed_label: str = ""
+    not_run_column: str = ""
+    not_run_label: str = ""
+    total_column: str = ""
+    total_label: str = ""
+
+
+class DimensionOption(CamelModel):
+    key: str
+    label: str
+    distinct: int
+
+
+class DimensionBucket(CamelModel):
+    value: str
+    row_count: int
+    passed: float = 0.0
+    failed: float = 0.0
+    not_run: float = 0.0
+    executed: float = 0.0
+    pass_rate_pct: float | None = None
+
+
+class FailingRow(CamelModel):
+    label: str
+    passed: float
+    failed: float
+    total: float
+
+
+class StatusBucket(CamelModel):
+    value: str
+    # passing | failing | pending | "" when the sheet uses a word we don't know
+    kind: str
+    row_count: int
+    measure: float
+
+
+class StatusSummary(CamelModel):
+    """An outcome recorded as a word against each row, weighted by what the
+    row is worth — three passing rows of four is 75%, but the 44 test cases
+    behind them out of 53 is 83%."""
+    status_column: str
+    status_label: str
+    measure_column: str
+    measure_label: str
+    basis: Literal["measure", "row_count"]
+    passed: float
+    failed: float
+    pending: float
+    unrecognised: float
+    decided: float          # passed + failed — what the rate is taken over
+    total: float
+    pass_rate_pct: float | None
+    row_count: int
+    statuses: list[StatusBucket] = []
+
+
+class OpenRow(CamelModel):
+    label: str
+    status: str
+    measure: float
+
+
+class InventoryItem(CamelModel):
+    id: str
+    detail: str
+    links: int
+
+
+class InventorySummary(CamelModel):
+    """A sheet that lists things rather than counting them: what it lists, and
+    how completely each entry names the work behind it."""
+    id_column: str
+    id_label: str
+    family: str             # the prefix the identifiers share, discovered
+    items: int
+    unreadable: int         # rows whose first column held no identifier
+    duplicates: int
+    link_family: str        # the family of the supporting ids, "" if none
+    linked: int
+    unlinked: int
+    links: int              # total supporting ids across every entry
+    linked_pct: float | None
+    unlinked_items: list[InventoryItem] = []
+    most_linked: list[InventoryItem] = []
+
+
+class DashboardProfile(CamelModel):
+    """Which dashboard this workbook's shape earned.
+
+    `volume` is the count-and-group view every layer used to get; a more
+    specific kind means the sheet carried something that view could not show.
+    """
+    kind: Literal["volume", "run_results", "status", "inventory"] = "volume"
+    reason: str = ""
+    run_results: RunResultsSummary | None = None
+    status: StatusSummary | None = None
+    inventory: InventorySummary | None = None
+    dimensions: list[DimensionOption] = []
+    dimension: str = ""
+    by_dimension: list[DimensionBucket] = []
+    failing_rows: list[FailingRow] = []
+    open_rows: list[OpenRow] = []
+
+
 class LayerDashboardResponse(CamelModel):
     # the one snapshot being read; null when the metrics are merged
     snapshot: SnapshotInfo | None = None
@@ -271,6 +393,9 @@ class LayerDashboardResponse(CamelModel):
     totals: dict[str, float]
     by_section: list[SectionAggregate]
     top_rows: list[TopRow]
+    # what kind of data this workbook holds, and so what to draw for it.
+    # Defaults to the volume view, which is what every layer used to get.
+    profile: DashboardProfile = DashboardProfile()
 
 
 class SourceFileInfo(CamelModel):

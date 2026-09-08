@@ -2,7 +2,8 @@
 import pytest
 
 from app.services.excel_ingest import IngestError, parse_workbook, sanitize_key
-from tests.helpers_xlsx import REAL_FILE, SIMPLE, build_workbook
+from tests.helpers_xlsx import (FEATURE_CONTINUATION, REAL_FILE, SIMPLE,
+                                build_workbook)
 
 
 def test_sections_headers_and_forward_fill():
@@ -119,6 +120,88 @@ def test_file_too_large():
     with pytest.raises(IngestError) as exc:
         parse_workbook(b"x" * (excel_ingest.MAX_FILE_BYTES + 1))
     assert exc.value.code == "file_too_large"
+
+
+# --- a lone cell: section title, or a continuation of the row above? ------
+# The Feature workbook writes a feature's extra related items on rows of their
+# own, filling only the last column. Reading those as section titles discarded
+# 28 of that sheet's 41 data rows and titled each feature with the previous
+# feature's last PBI.
+
+
+def test_a_lone_cell_past_the_first_column_continues_the_row_above():
+    parsed = parse_workbook(build_workbook(FEATURE_CONTINUATION))
+    first, _summary, related = (c["key"] for c in parsed.columns)
+    helix = next(r for r in parsed.rows if r.values[first] == "FL-5773")
+    assert helix.values[related].split("\n") == [
+        "CS-4614 - Helix US1: Manual control",
+        "CS-4615 - Helix US2: Basic support",
+        "CS-4616 - Helix US3: Motorized frame",
+    ]
+
+
+def test_continuations_are_joined_not_counted_as_rows():
+    """The sheet lists three features; the continuations belong to them."""
+    parsed = parse_workbook(build_workbook(FEATURE_CONTINUATION))
+    first = parsed.columns[0]["key"]
+    assert [r.values[first] for r in parsed.rows] == ["FL-5773", "FL-5807", "FL-5775"]
+    assert parsed.total_rows == 3
+
+
+def test_a_lone_cell_in_the_first_column_is_still_a_section():
+    """Both conventions in one sheet: only "Deconvolution" opens a section."""
+    parsed = parse_workbook(build_workbook(FEATURE_CONTINUATION))
+    assert sorted(parsed.sections) == ["Deconvolution", "General"]
+    first = parsed.columns[0]["key"]
+    by_id = {r.values[first]: r.section for r in parsed.rows}
+    assert by_id["FL-5775"] == "Deconvolution"    # after the title
+    assert by_id["FL-5773"] == "General"          # before it
+    # and no related item was mistaken for one
+    assert not any(s.startswith("CS-") for s in parsed.sections)
+
+
+def test_a_continuation_fills_a_column_the_row_left_empty():
+    rows = [["ID", "Summary", "Related"],
+            ["FL-1", "Something", None],
+            [None, None, "CS-9 - arrived late"]]
+    parsed = parse_workbook(build_workbook(rows))
+    assert parsed.rows[0].values["related"] == "CS-9 - arrived late"
+    assert len(parsed.rows) == 1
+
+
+def test_a_continuation_never_joins_a_row_from_another_section():
+    """A section boundary ends the row a continuation could belong to; with
+    nothing above it in this section, it reads as a title again."""
+    rows = [["ID", "Summary", "Related"],
+            ["FL-1", "Something", "CS-1 - first"],
+            ["Camera testing"],
+            [None, None, "CS-2 - orphan"],
+            ["FL-2", "Another", "CS-3 - second"]]
+    parsed = parse_workbook(build_workbook(rows))
+    assert parsed.rows[0].values["related"] == "CS-1 - first"   # not joined
+    assert "CS-2 - orphan" in parsed.sections
+
+
+def test_a_lone_cell_with_no_row_above_it_is_a_section():
+    rows = [["ID", "Summary", "Related"],
+            [None, None, "CS-1 - nothing precedes this"],
+            ["FL-1", "Something", "CS-2 - first real row"]]
+    parsed = parse_workbook(build_workbook(rows))
+    assert "CS-1 - nothing precedes this" in parsed.sections
+    assert len(parsed.rows) == 1
+
+
+def test_a_lone_cell_before_the_header_start_is_a_section():
+    """cellSens-Count.xlsx in miniature: its header starts at column 1 while
+    its section banners sit at column 0, so "not the first column" has to mean
+    the header's span, not the sheet's."""
+    rows = [[None, "Test spec name", "Test Count"],
+            ["Camera testing"],
+            [None, "DP23", 10],
+            [None, "IX73", 20]]
+    parsed = parse_workbook(build_workbook(rows))
+    assert parsed.sections == ["Camera testing"]
+    assert len(parsed.rows) == 2
 
 
 def test_sanitize_key():

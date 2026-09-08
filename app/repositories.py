@@ -411,11 +411,19 @@ async def resolve_snapshot(
     return doc
 
 
-async def snapshot_rows(snapshot_id: str) -> list[dict]:
-    """Row keys and values of a snapshot — what a diff is computed against."""
-    return await get_db().layer_records.find(
+async def snapshot_rows(snapshot_id: str, limit: int | None = None) -> list[dict]:
+    """Row keys and values of a snapshot — what a diff is computed against.
+
+    A diff needs every row and passes no limit. The inventory dashboard reads
+    identifiers out of the values instead, which cannot be done in the query,
+    so it caps what it pulls back.
+    """
+    cursor = get_db().layer_records.find(
         {"snapshotId": snapshot_id}, projection={"rowKey": 1, "data": 1, "_id": 0}
-    ).to_list(None)
+    ).sort([("section", 1), ("rowIndex", 1)])
+    if limit is not None:
+        cursor = cursor.limit(limit)
+    return await cursor.to_list(None)
 
 
 async def create_snapshot(doc: dict, rows: list) -> dict:
@@ -534,6 +542,146 @@ async def aggregate_dashboard(snapshot_id: str, columns: list[dict]) -> dict:
     return {"totalRows": total_rows, "sectionCount": len(by_section),
             "numericColumns": numeric, "totals": totals,
             "bySection": by_section, "topRows": top_rows}
+
+
+SAMPLE_VALUES = 25
+
+
+async def column_stats(snapshot_id: str, columns: list[dict]) -> dict[str, dict]:
+    """What each text column holds: how full it is, how many different values,
+    and a sample of them.
+
+    Three questions are answered from this. Whether a column can group anything
+    — `OS ver.` has two values over thirty-nine rows and groups them usefully,
+    `cellSens Edition` has twenty-five and groups nothing. Whether it records an
+    outcome, which is decided by reading the values rather than the label.
+    And which column best describes a row.
+
+    One `$facet` asks for every column at once rather than a round trip each.
+    """
+    text = [c for c in columns if c.get("type") == "string"][:16]
+    if not text:
+        return {}
+    facet = {
+        col["key"]: [
+            {"$match": {f'data.{col["key"]}': {"$ne": None}}},
+            {"$group": {"_id": f'$data.{col["key"]}', "n": {"$sum": 1}}},
+            {"$group": {"_id": None, "distinct": {"$sum": 1},
+                        "filled": {"$sum": "$n"},
+                        "values": {"$push": "$_id"}}},
+            {"$project": {"distinct": 1, "filled": 1,
+                          "values": {"$slice": ["$values", SAMPLE_VALUES]}}},
+        ]
+        for col in text
+    }
+    cursor = await get_db().layer_records.aggregate([
+        {"$match": {"snapshotId": snapshot_id}},
+        {"$facet": facet},
+    ])
+    result = await cursor.to_list(1)
+    if not result:
+        return {}
+    out: dict[str, dict] = {}
+    for key, buckets in result[0].items():
+        found = buckets[0] if buckets else {}
+        out[key] = {"distinct": found.get("distinct", 0),
+                    "filled": found.get("filled", 0),
+                    "values": found.get("values", [])}
+    return out
+
+
+async def status_breakdown(snapshot_id: str, status_key: str,
+                           measure_key: str) -> list[dict]:
+    """Each outcome word, how many rows carry it, and what those rows are worth.
+
+    The measure travels with the count because a row is not a test: four rows
+    carrying 12, 18, 9 and 14 test cases do not vote equally.
+    """
+    if not status_key:
+        return []
+    group: dict = {"_id": f"$data.{status_key}", "rowCount": {"$sum": 1}}
+    if measure_key:
+        group["measure"] = {"$sum": f"$data.{measure_key}"}
+    cursor = await get_db().layer_records.aggregate([
+        {"$match": {"snapshotId": snapshot_id, f"data.{status_key}": {"$ne": None}}},
+        {"$group": group},
+        {"$sort": {"rowCount": -1, "_id": 1}},
+    ])
+    return [{"value": doc["_id"], "rowCount": doc["rowCount"],
+             "measure": doc.get("measure") or 0}
+            async for doc in cursor]
+
+
+async def rows_with_status(snapshot_id: str, status_key: str, values: list[str],
+                           label_keys: list[str], measure_key: str,
+                           limit: int = 20) -> list[dict]:
+    """The rows sitting on the outcomes worth acting on — what failed, and what
+    nobody has run yet."""
+    if not status_key or not values:
+        return []
+    docs = await get_db().layer_records.find(
+        {"snapshotId": snapshot_id, f"data.{status_key}": {"$in": values}},
+        projection={"data": 1, "section": 1},
+    ).limit(limit).to_list(None)
+
+    out = []
+    for doc in docs:
+        data = doc.get("data") or {}
+        label = " · ".join(str(data[k]) for k in label_keys if data.get(k) is not None)
+        out.append({
+            "label": label or doc.get("section", ""),
+            "status": str(data.get(status_key, "")),
+            "measure": float(data.get(measure_key) or 0) if measure_key else 0.0,
+        })
+    return out
+
+
+async def dimension_breakdown(snapshot_id: str, dimension: str,
+                              measures: list[str], limit: int = 12) -> list[dict]:
+    """One snapshot's measures grouped by a column of its own — pass and fail
+    per tester, per OS, per install type. Read-time only; nothing is stored."""
+    if not dimension:
+        return []
+    group: dict = {"_id": f"$data.{dimension}", "rowCount": {"$sum": 1}}
+    for key in measures:
+        if key:
+            group[key] = {"$sum": f"$data.{key}"}
+    cursor = await get_db().layer_records.aggregate([
+        {"$match": {"snapshotId": snapshot_id, f"data.{dimension}": {"$ne": None}}},
+        {"$group": group},
+        {"$sort": {"rowCount": -1, "_id": 1}},
+        {"$limit": limit},
+    ])
+    return [{"value": str(doc["_id"]), "rowCount": doc["rowCount"],
+             **{key: doc.get(key) or 0 for key in measures if key}}
+            async for doc in cursor]
+
+
+async def rows_with_failures(snapshot_id: str, fail_key: str, label_keys: list[str],
+                             measures: dict[str, str], limit: int = 10) -> list[dict]:
+    """The rows that failed, worst first — where a results sheet is actually read.
+
+    Named by the columns that distinguish one run from another rather than by
+    every text column the sheet carries.
+    """
+    if not fail_key:
+        return []
+    docs = await get_db().layer_records.find(
+        {"snapshotId": snapshot_id, f"data.{fail_key}": {"$gt": 0}},
+        projection={"data": 1, "section": 1},
+    ).sort(f"data.{fail_key}", -1).limit(limit).to_list(None)
+
+    out = []
+    for doc in docs:
+        data = doc.get("data") or {}
+        label = " · ".join(str(data[k]) for k in label_keys if data.get(k) is not None)
+        out.append({
+            "label": label or doc.get("section", ""),
+            "passed": float(data.get(measures.get("passed", "")) or 0),
+            "failed": float(data.get(fail_key) or 0),
+            "total": float(data.get(measures.get("total", "")) or 0),
+        })
+    return out
 
 
 async def aggregate_merged_dashboard(app_id: str, release_id: str,

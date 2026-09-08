@@ -9,11 +9,25 @@ Sheets arrive from testers as loosely structured "section block" documents:
     Microscope testing                                   on the first row of a
     Test spec name | ...                                 group (forward-fill)
 
+A lone filled cell means one of two things, and which one depends on the
+column it sits in:
+
+    ID      | Summary                  | PBI / Related Item
+    FL-5773 | Helix: support of BX57   | CS-4614 - Helix US1: Manual control
+            |                          | CS-4615 - Helix US2: Basic support  <- a
+            |                          | CS-4616 - Helix US3: Motor frame       continuation
+
+In the span's first column it opens a section ("Camera testing"). Past that
+column it continues the row above: one feature naming a second related item,
+on its own row because a cell holds one value. Both conventions appear in real
+workbooks and nothing but the column distinguishes them.
+
 Column sets differ between workbooks, so nothing here is specific to any one
 sheet: the parser discovers the columns from the first header row, detects
-section titles, forward-fills sparse leading columns, and deduplicates rows
-*within that file*. Files are never combined — two workbooks feeding the same
-testing type stay two datasets, each with its own columns and history.
+section titles, forward-fills sparse leading columns, joins continuations onto
+the row they belong to, and deduplicates rows *within that file*. Files are
+never combined — two workbooks feeding the same testing type stay two
+datasets, each with its own columns and history.
 
 Row identity (`row_key`) hashes the section plus the values of the
 string-typed columns only — string columns are dimensions (spec/tab names),
@@ -267,8 +281,22 @@ def parse_workbook(data: bytes) -> ParsedSheet:
         if not f:
             continue
         if len(f) == 1:
-            # single non-empty cell -> section title
-            section = str(f[0][1])
+            column, value = f[0]
+            # A lone cell is a section title only when it sits in the first
+            # column of the header's span. Past that column it continues the
+            # row above — one feature naming a second related item, on its own
+            # row because a cell holds one value. Real sheets use both
+            # conventions and nothing but the column tells them apart: the
+            # Feature workbook writes 28 such continuations, and reading them
+            # as titles discarded two thirds of the sheet.
+            offset = column - header_start
+            if 0 < offset < width and data_rows and data_rows[-1][0] == section:
+                target = data_rows[-1][1]
+                # mutating in place keeps `fill` correct — it is this same list
+                target[offset] = (value if target[offset] is None
+                                  else f"{target[offset]}\n{value}")
+                continue
+            section = str(value)
             if section not in sections:
                 sections.append(section)
             fill = []
