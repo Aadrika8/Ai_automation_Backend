@@ -50,6 +50,7 @@ from app.models import (
 )
 from app.security import get_current_user, require_role
 from app.services import excel_source
+from app.services import profile as prof
 from app.services.excel_ingest import (
     MAX_FILE_BYTES,
     IngestError,
@@ -74,6 +75,9 @@ FileQuery = Query(default=None, max_length=400)
 # A read-time view only — records are always stored one file per snapshot.
 MergedQuery = Query(default=False)
 MonthQuery = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+# which column a results dashboard breaks its figures down by. A column this
+# workbook does not have falls back to the default rather than erroring.
+DimensionQuery = Query(default="", max_length=120)
 
 
 def _now() -> datetime:
@@ -687,7 +691,8 @@ async def get_dashboard(app_id: Slug, release_id: Slug, layer_id: Slug,
                         file: str | None = FileQuery,
                         snapshot: str | None = SnapshotQuery,
                         month: str | None = MonthQuery,
-                        merged: bool = MergedQuery):
+                        merged: bool = MergedQuery,
+                        dimension: str = DimensionQuery):
     """Metrics for one workbook, or — with `merged` — for every file at once.
 
     Merging adds up the current snapshot of each file at read time. The stored
@@ -708,8 +713,99 @@ async def get_dashboard(app_id: Slug, release_id: Slug, layer_id: Slug,
     if found is None:
         return {"snapshot": None, "totalRows": 0, "sectionCount": 0,
                 "numericColumns": [], "totals": {}, "bySection": [], "topRows": []}
-    stats = await repo.aggregate_dashboard(found["id"], found.get("columns", []))
-    return {"snapshot": found, **stats}
+    columns = found.get("columns", [])
+    stats = await repo.aggregate_dashboard(found["id"], columns)
+    profile = await _dashboard_profile(found["id"], columns, stats, dimension)
+    return {"snapshot": found, **stats, "profile": profile}
+
+
+async def _dashboard_profile(snapshot_id: str, columns: list[dict], stats: dict,
+                             requested_dimension: str) -> dict:
+    """What kind of data this workbook holds, and the breakdown that suits it.
+
+    A sheet that only counts things keeps the view it always had — the profile
+    comes back as `volume` and nothing else in the response changes. The extra
+    queries below run only for a sheet that turned out to hold something the
+    count-and-group view cannot show.
+    """
+    rows = stats.get("totalRows", 0)
+    # one round trip; needed to tell a grouping column from an identifier, and
+    # an outcome column from a column merely named like one
+    col_stats = await repo.column_stats(snapshot_id, columns)
+    shape = prof.describe(columns, stats.get("totals", {}), col_stats, rows)
+    if shape["kind"] == "volume":
+        return shape
+
+    distincts = {key: info["distinct"] for key, info in col_stats.items()}
+    if shape["kind"] == "status":
+        return await _status_profile(snapshot_id, columns, shape, col_stats,
+                                     distincts, rows, requested_dimension)
+    if shape["kind"] == "inventory":
+        records = await repo.snapshot_rows(snapshot_id, prof.MAX_INVENTORY_ROWS)
+        return {**shape,
+                "inventory": prof.summarise_inventory(records, shape["inventory"])}
+
+    run = shape["runResults"]
+    dimensions = prof.rank_dimensions(columns, distincts, rows)
+    dimension = prof.choose_dimension(dimensions, requested_dimension)
+
+    measures = {role: run.get(f"{role}Column", "")
+                for role in ("passed", "failed", "notRun", "total")}
+    buckets = await repo.dimension_breakdown(
+        snapshot_id, dimension, [k for k in measures.values() if k])
+    # the aggregation keys buckets by column key; the screen reads them by role
+    by_dimension = [
+        prof.bucket_rate({
+            "value": b["value"], "rowCount": b["rowCount"],
+            **{role: float(b.get(key) or 0) for role, key in measures.items() if key},
+        }, run)
+        for b in buckets
+    ]
+
+    return {**shape, "dimensions": dimensions, "dimension": dimension,
+            "byDimension": by_dimension,
+            "failingRows": await repo.rows_with_failures(
+                snapshot_id, measures["failed"],
+                prof.label_columns(columns, dimensions), measures)}
+
+
+async def _status_profile(snapshot_id: str, columns: list[dict], shape: dict,
+                          col_stats: dict, distincts: dict, rows: int,
+                          requested_dimension: str) -> dict:
+    """A sheet that records an outcome word against each row.
+
+    Weighted by whatever the sheet counts, because a row is not a test: the
+    regression sheet's four rows carry 12, 18, 9 and 14 test cases, so three
+    passing rows out of four is 75% while the cases behind them are 83%.
+    """
+    status = shape["status"]
+    status_key = status["statusColumn"]
+    measure = prof.primary_measure(columns)
+
+    buckets = await repo.status_breakdown(snapshot_id, status_key,
+                                          measure["key"] if measure else "")
+    summary = prof.summarise_status(buckets, status, measure)
+
+    # breaking the status down by the status would say nothing
+    dimensions = [d for d in prof.rank_dimensions(columns, distincts, rows)
+                  if d["key"] != status_key]
+    dimension = prof.choose_dimension(dimensions, requested_dimension)
+    by_dimension = []
+    if dimension:
+        raw = await repo.dimension_breakdown(
+            snapshot_id, dimension, [measure["key"]] if measure else [])
+        by_dimension = [{"value": b["value"], "rowCount": b["rowCount"]} for b in raw]
+
+    # what is worth acting on: failures first, then whatever nobody has run
+    open_values = [s["value"] for s in summary["statuses"]
+                   if s["kind"] in ("failing", "pending")]
+    return {**shape, "status": summary,
+            "dimensions": dimensions, "dimension": dimension,
+            "byDimension": by_dimension,
+            "openRows": await repo.rows_with_status(
+                snapshot_id, status_key, open_values,
+                prof.label_columns(columns, dimensions, col_stats, (status_key,)),
+                measure["key"] if measure else "")}
 
 
 @router.delete("/apps/{app_id}/releases/{release_id}/layers/{layer_id}/records",

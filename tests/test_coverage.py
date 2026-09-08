@@ -203,6 +203,29 @@ def test_supporting_ids_are_gathered_across_a_forward_filled_group():
     assert [r["id"] for r in gap["relatedIds"]] == ["CS-1", "CS-2", "CS-3"]
 
 
+def test_supporting_ids_survive_the_continuation_rows_they_arrived_on():
+    """The real Feature sheet writes a feature's extra related items on rows of
+    their own, filling only the last column. The parser joins them onto the
+    feature; every one of them has to reach the gap as evidence.
+
+    Before the parser distinguished a continuation from a section title, these
+    rows were discarded and this feature reported one supporting id out of four.
+    """
+    rows = [
+        ["ID", "Summary (cellSens)", "PBI / Related Item"],
+        ["FL-9", "Helix: support of new BX57/47", "CS-1 - Helix US1: Manual control"],
+        [None, None, "CS-2 - Helix US2: Basic support"],
+        [None, None, "CS-3 - Helix US3: Motorized frame"],
+        [None, None, "CS-4 - Helix US4: Setup"],
+    ]
+    gap = by_id(coverage(rows, [["ID", "S"], ["FL-99", "x"]]))["FL-9"]
+    assert [r["id"] for r in gap["relatedIds"]] == ["CS-1", "CS-2", "CS-3", "CS-4"]
+    # each carries the text it sat in, so the reader can see what it refers to
+    assert gap["relatedIds"][3]["text"].endswith("Helix US4: Setup")
+    # and the feature is still one row, counted once
+    assert gap["featureCount"] == 1 and gap["duplicate"] is False
+
+
 def test_supporting_ids_come_from_the_whole_row_not_one_column():
     """A supporting id moves between columns from one release to the next."""
     rows = [["Feature", "Story", "Notes"],

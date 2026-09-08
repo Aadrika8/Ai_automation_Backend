@@ -49,6 +49,73 @@ SYSTEM_SHEET = [
 ]
 
 
+# --- a run-results sheet, shaped like the real Acceptance workbook
+# Pattern No. is a serial, not a measure; `type` and `Tester` repeat and so can
+# group the results; `%age` is a per-row rate that must never be summed.
+#
+# Every row's (OS, type, Tester) triple is different on purpose. Row identity
+# hashes the *string* columns only, so two runs of the same configuration with
+# different counts are one row — which is right for a spec sheet and would
+# silently drop a repeat run here.
+#
+# Passed 88, failed 5, not run 3, of 96 planned.
+
+RUN_RESULTS = [
+    ["Pattern No.", "OS ver.", "type", "Tester", "TC count", "Pass", "Fail", "NA", "%age"],
+    [1, "Win11 Pro 64bit", "Clean Install", "Sreelakshmi", 28, 26, 1, 1, 92.9],
+    [2, "Win10 Pro 64bit", "Version Update", "Rahul", 26, 24, 2, 0, 92.3],
+    [3, "Win11 Pro 64bit", "Clean Install", "Meera", 20, 18, 1, 1, 90.0],
+    [4, "Win10 Pro 64bit", "Repair Install", "Rahul", 10, 9, 0, 1, 90.0],
+    [5, "Win11 Pro 64bit", "Silent Install", "Meera", 12, 11, 1, 0, 91.7],
+]
+
+
+# --- a sheet recording the outcome as a word per row, not as counts
+# Shaped like the real Regression_Test (2).xlsx. The measure matters: three
+# passing rows out of four is 75%, but the 44 test cases behind them out of 53
+# is 83%, and those are different claims.
+
+STATUS_SHEET = [
+    ["Test ID", "Requirement ID", "Test Description", "Status", "Test Cases"],
+    ["REG-1001", "FL-5773", "Microscope connection", "Passed", 12],
+    ["REG-1002", "FL-5774", "Image acquisition", "Passed", 18],
+    ["REG-1003", "FL-5775", "Export workflow", "Failed", 9],
+    ["REG-1004", "FL-5776", "Settings persistence", "Passed", 14],
+]
+
+
+# --- the Feature workbook's continuation convention
+# One feature can name several related items, and each goes on its own row with
+# only the last column filled. Those rows continue the feature above them; the
+# lone "Deconvolution" cell, in the *first* column, is a real section title.
+# Both shapes are here because only the column tells them apart.
+
+FEATURE_CONTINUATION = [
+    ["ID", "Summary (cellSens)", "PBI / Related Item"],
+    ["FL-5773", "Helix: support of new BX57/47", "CS-4614 - Helix US1: Manual control"],
+    [None, None, "CS-4615 - Helix US2: Basic support"],
+    [None, None, "CS-4616 - Helix US3: Motorized frame"],
+    ["FL-5807", "Cicero Spinning Disk (CREST)", None],       # no related item at all
+    ["Deconvolution"],                                        # a real section title
+    ["FL-5775", "Reorganize CI modalities", "CS-4760 - Refactor modularities"],
+    [None, None, "CS-4751 - PFE/GEM"],
+]
+
+
+# --- an inventory: identifiers and the work behind them, nothing to count
+# FL-5807 names no work item, which is the whole point of the sheet's dashboard.
+
+INVENTORY_SHEET = [
+    ["ID", "Summary (cellSens)", "PBI / Related Item"],
+    ["FL-5773", "Helix: support of new BX57/47", "CS-4614 - Helix US1: Manual control"],
+    [None, None, "CS-4615 - Helix US2: Basic support"],
+    [None, None, "CS-4616 - Helix US3: Motorized frame"],
+    ["FL-5776", "FIJI/ImageJ Bridge for cellSens", "CS-4759 - PBI 1: >3 dimensions"],
+    [None, None, "CS-4798 - PBI 2: APEX"],
+    ["FL-5807", "Cicero Spinning Disk (CREST)", None],
+]
+
+
 def rows_of(parsed, file: str = "sheet.xlsx") -> list[dict]:
     """Parsed rows in the shape the coverage service consumes.
 

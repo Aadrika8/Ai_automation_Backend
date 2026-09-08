@@ -40,9 +40,13 @@ was never there.
 
 The parser understands the testers' real sheet structure:
 
-- **Section blocks** — a row with a single filled cell ("Camera testing") starts
-  a section; the next multi-cell row is the header; repeated headers per section
-  are skipped.
+- **Section blocks** — a row with a single filled cell *in the first column of the
+  header's span* ("Camera testing") starts a section; the next multi-cell row is the
+  header; repeated headers per section are skipped.
+- **Continuations** — a single filled cell *past* that column continues the row above
+  instead, joined onto it with a newline. The Feature sheet writes a feature's extra
+  related items this way, one per row; only the column distinguishes them from a
+  section title.
 - **Forward-fill** — a spec name filled only on the first row of a group is
   inherited by the rows below it (resets at section boundaries).
 - **Normalization** — whitespace/NBSP cleanup, numeric coercion, per-column
