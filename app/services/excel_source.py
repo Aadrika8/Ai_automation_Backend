@@ -1,27 +1,4 @@
-r"""Path-based discovery of the Excel test catalog.
 
-There is one rule, and one configured value behind it:
-
-    <excelRoot>\<application>\<release>\<layer>.xlsx
-
-`excelRoot` is set once, in Settings. The two folders under it are named after
-the application and the release as they read in the UI — cellSens\4.5.1 — so a
-release created in the app tells you exactly which folder to create on disk. A
-release whose folder is somewhere else carries its own relative path instead;
-that override is the only per-release configuration, and it is normally blank.
-
-Each release reads only its own folder, so a workbook that changes shape
-between releases — different columns, sections or size — is parsed fresh into
-that release and cannot disturb what an earlier release already holds.
-
-Nothing here parses cells: `excel_ingest.parse_workbook` still does that, on
-bytes read from disk. This module answers the questions that come *before*
-parsing — is the path usable, which workbooks are there, which layer does each
-belong to, and has any of them changed since the last sync.
-
-Everything raises `SourceError` with a code and a message written for the
-person reading it, never a bare OSError.
-"""
 import hashlib
 import os
 import re
@@ -228,6 +205,37 @@ def read_workbook_bytes(path: Path) -> bytes:
 def fingerprint_bytes(data: bytes) -> str:
     """Fingerprint of content already in hand — what ingestion records."""
     return hashlib.sha256(data).hexdigest()
+
+
+def detect_rename(known: dict[str, str], present: set[str], content_hash: str) -> str:
+    """The workbook this one used to be called, or "" when it is genuinely new.
+
+    A renamed workbook would otherwise fork: the new name starts its own series
+    at #1 while the old one lives on, and because a layer's record count sums
+    across its files, a rename doubles it — which then feeds the pyramid check.
+
+    Two signals separate a rename from a copy, and both are already in hand
+    when a load decides what to do with a file:
+
+        the old name is gone from the folder   and   the content is identical
+
+    A copy leaves the original in place, so it fails the first test and stays
+    two datasets. Anything whose content differs at all fails the second.
+
+    `known` maps each of the layer's files to the content hash of its current
+    snapshot; `present` is every path the folder scan just found.
+
+    Two deliberate refusals. More than one absent file with this hash is
+    ambiguous — nothing here can say which one was renamed, so it declines and
+    the load proceeds as a new file. And a workbook renamed *and* edited in one
+    step has a different hash, so it reads as new; recovering that would mean
+    guessing at similarity, which is worse than starting a fresh series.
+    """
+    if not content_hash:
+        return ""
+    candidates = [file for file, digest in known.items()
+                  if file not in present and digest == content_hash]
+    return candidates[0] if len(candidates) == 1 else ""
 
 
 def fingerprint_file(path: Path) -> str:

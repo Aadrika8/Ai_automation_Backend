@@ -141,6 +141,19 @@ class LayerUpdate(CamelModel):
     order: int | None = None
 
 
+class QualityWarning(CamelModel):
+    """Something wrong with one workbook, judged on its own.
+
+    Never a comparison with an earlier load — a warning is a property of the
+    file, so it reads the same on the first load as on the fifth. `problem`
+    means data was lost or a figure is now wrong; `notice` means worth a look.
+    Neither ever blocks a load.
+    """
+    code: str
+    severity: Literal["problem", "notice"]
+    message: str
+
+
 class SnapshotSource(CamelModel):
     """One workbook that went into a snapshot, kept so the load can be traced
     back to the files it came from."""
@@ -198,6 +211,10 @@ class SnapshotInfo(CamelModel):
     identity_keys: list[str] = []
     sources: list[SnapshotSource] = []
     diff: SnapshotDiff | None = None
+    # what was wrong with the workbook when it was read. Kept with the reading
+    # the way `diff` is, because the rows the parse discarded are gone and
+    # these cannot be recomputed. Snapshots taken before the check carry none.
+    warnings: list[QualityWarning] = []
     # true only for snapshots migrated from before files were kept separate
     combined: bool = False
     created_at: datetime
@@ -393,6 +410,8 @@ class LayerDashboardResponse(CamelModel):
     totals: dict[str, float]
     by_section: list[SectionAggregate]
     top_rows: list[TopRow]
+    # what was wrong with the workbook these figures came from
+    warnings: list[QualityWarning] = []
     # what kind of data this workbook holds, and so what to draw for it.
     # Defaults to the volume view, which is what every layer used to get.
     profile: DashboardProfile = DashboardProfile()
@@ -465,6 +484,12 @@ class SnapshotFileResult(CamelModel):
     total_rows: int = 0
     duplicates_skipped: int = 0
     diff: SnapshotDiff | None = None
+    # reported whether or not a snapshot was written: a workbook that has not
+    # changed since its last load still has whatever is wrong with it
+    warnings: list[QualityWarning] = []
+    # the workbook this one used to be called, when a load recognised a rename
+    # and carried its history across rather than starting a second dataset
+    renamed_from: str = ""
     # why nothing was written, when nothing was
     reason: str | None = None
     error: str | None = None
@@ -475,6 +500,9 @@ class SnapshotRunResult(CamelModel):
     release_id: str = ""
     period: SnapshotPeriod
     files: list[SnapshotFileResult] = []
+    # findings about the release as a whole rather than one workbook — two
+    # files holding the same rows, for one
+    warnings: list[QualityWarning] = []
 
 
 class AppSettings(CamelModel):

@@ -64,8 +64,8 @@ async def test_the_volume_response_is_unchanged(client, manager_headers, loaded)
     body = (await client.get(UNIT, headers=manager_headers)).json()
     assert body["totalRows"] == 3
     assert body["sectionCount"] == 2
-    assert [c["label"] for c in body["numericColumns"]] == ["Test Count"]
-    assert body["totals"]["test_count"] == 35
+    assert [c["label"] for c in body["numericColumns"]] == ["Test count"]
+    assert body["totals"]["total_tests"] == 35
     assert {s["section"] for s in body["bySection"]} == {
         "Camera testing", "Microscope testing"}
     assert body["topRows"]
