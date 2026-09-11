@@ -51,6 +51,7 @@ from app.models import (
 from app.security import get_current_user, require_role
 from app.services import excel_source
 from app.services import profile as prof
+from app.services import quality
 from app.services.excel_ingest import (
     MAX_FILE_BYTES,
     IngestError,
@@ -412,6 +413,11 @@ async def create_snapshots(app_id: Slug, release_id: Slug, body: SnapshotRequest
                    "Name each file after its type, or choose the files explicitly.")
 
     root, rel = status["root"], status["folder"]
+    # every path the scan just found, matched or not. A workbook missing from
+    # this set is one that is no longer on disk — which is what distinguishes a
+    # rename from a copy when a new name turns up holding identical content.
+    present = {f["relativePath"] for b in status["layers"] for f in b["files"]}
+    present |= {f["relativePath"] for f in status["unmatchedFiles"]}
     results: list[dict] = []
 
     for layer_id, rel_files in chosen:
@@ -436,15 +442,49 @@ async def create_snapshots(app_id: Slug, release_id: Slug, body: SnapshotRequest
             results.append(
                 await _snapshot_one_file(app_id, release_id, layer_id,
                                          block["layerName"], root, rel, rel_file,
-                                         period, user["username"]))
+                                         period, user["username"], present))
 
     return {"createdAt": now, "releaseId": release_id, "period": period,
-            "files": results}
+            "files": results,
+            "warnings": await _duplicate_file_warnings(
+                app_id, release_id, {layer_id for layer_id, _ in chosen})}
+
+
+async def _duplicate_file_warnings(app_id: str, release_id: str,
+                                   layer_ids: set[str]) -> list[dict]:
+    """Layers holding two workbooks with identical contents.
+
+    A rename is detected and folded away, so what reaches here is a *copy*: both
+    files are still on disk, both are real datasets by the rule this system
+    runs on, and their rows are counted twice in the layer's total. Nothing can
+    honestly merge them — files are never combined — so the load says so
+    instead of quietly reporting double.
+    """
+    out: list[dict] = []
+    for layer_id in sorted(layer_ids):
+        by_hash: dict[str, list[str]] = {}
+        for snapshot in await repo.list_current_snapshots(app_id, release_id, layer_id):
+            digest = snapshot.get("contentHash") or ""
+            if digest:
+                by_hash.setdefault(digest, []).append(
+                    PurePosixPath(snapshot.get("file", "")).name)
+        for files in by_hash.values():
+            if len(files) > 1:
+                out.append({
+                    "code": "identical_workbooks",
+                    "severity": "problem",
+                    "message": f"{' and '.join(sorted(files))} hold identical "
+                               f"contents. They are separate datasets, so their "
+                               f"rows are counted twice in this testing type's "
+                               f"total — remove one, or change what it contains.",
+                })
+    return out
 
 
 async def _snapshot_one_file(app_id: str, release_id: str, layer_id: str,
                              layer_name: str, root: str, rel: str, rel_file: str,
-                             period: dict, username: str) -> dict:
+                             period: dict, username: str,
+                             present: set[str] | None = None) -> dict:
     """Read one workbook and record it, if it says anything new.
 
     Everything here is scoped to this one file: its own previous snapshot, its
@@ -460,13 +500,38 @@ async def _snapshot_one_file(app_id: str, release_id: str, layer_id: str,
     except (SourceError, IngestError) as e:
         return {**base, "error": e.message}
 
+    # What is wrong with this workbook is a property of the workbook: computed
+    # from this parse alone, never from what was loaded before it, and reported
+    # even when the load writes nothing — a bad sheet that has not changed is
+    # still a bad sheet, and a reload that came back clean would say otherwise.
+    warnings = quality.inspect(parsed)
+
+    # A name with no history of its own might be a rename rather than a new
+    # workbook. Renaming makes no new data, so forking here would leave the old
+    # series behind to be counted alongside this one — and a layer's record
+    # count sums across its files, so the pyramid check would read double.
+    renamed_from = ""
+    if present is not None and \
+            await repo.latest_snapshot(app_id, release_id, layer_id, rel_file) is None:
+        known = {s["file"]: s.get("contentHash", "")
+                 for s in await repo.list_current_snapshots(app_id, release_id, layer_id)}
+        renamed_from = excel_source.detect_rename(known, present, parsed.content_hash)
+        if renamed_from:
+            await repo.move_file_series(app_id, release_id, layer_id,
+                                        renamed_from, rel_file)
+    base = {**base, "renamedFrom": renamed_from}
+
+    # the moved series is this file's history now, so everything below is the
+    # ordinary path: identical content, therefore nothing to write
     previous = await repo.latest_snapshot(app_id, release_id, layer_id, rel_file)
     if previous is not None and previous.get("contentHash") == parsed.content_hash:
+        moved = f"Renamed from {PurePosixPath(renamed_from).name}. " if renamed_from else ""
         return {**base, "created": False,
                 "rowCount": previous.get("rowCount", 0),
                 "totalRows": parsed.total_rows,
                 "duplicatesSkipped": parsed.duplicates_skipped,
-                "reason": f'No change since snapshot #{previous.get("sequence")}.'}
+                "warnings": warnings,
+                "reason": f'{moved}No change since snapshot #{previous.get("sequence")}.'}
 
     # compared with this file's own previous snapshot, when the two were keyed
     # the same way — a changed sheet format makes rows incomparable
@@ -508,6 +573,9 @@ async def _snapshot_one_file(app_id: str, release_id: str, layer_id: str,
         "totalRows": parsed.total_rows,
         "duplicatesSkipped": parsed.duplicates_skipped,
         "diff": diff,
+        # kept with the reading they describe, the way `diff` is: the rows the
+        # parse discarded are gone, so these cannot be recomputed later
+        "warnings": warnings,
         "createdAt": _now(),
         "createdBy": username,
     }
@@ -515,7 +583,8 @@ async def _snapshot_one_file(app_id: str, release_id: str, layer_id: str,
     return {**base, "created": True, "snapshotId": snapshot["_id"],
             "sequence": snapshot["sequence"], "rowCount": snapshot["rowCount"],
             "totalRows": parsed.total_rows,
-            "duplicatesSkipped": parsed.duplicates_skipped, "diff": diff}
+            "duplicatesSkipped": parsed.duplicates_skipped, "diff": diff,
+            "warnings": warnings}
 
 
 @router.get("/apps/{app_id}/releases/{release_id}/layers/{layer_id}/files",
@@ -716,7 +785,10 @@ async def get_dashboard(app_id: Slug, release_id: Slug, layer_id: Slug,
     columns = found.get("columns", [])
     stats = await repo.aggregate_dashboard(found["id"], columns)
     profile = await _dashboard_profile(found["id"], columns, stats, dimension)
-    return {"snapshot": found, **stats, "profile": profile}
+    # what was wrong with the workbook these figures came from, as recorded
+    # when it was read. Older snapshots predate the check and carry none.
+    return {"snapshot": found, **stats, "profile": profile,
+            "warnings": found.get("warnings", [])}
 
 
 async def _dashboard_profile(snapshot_id: str, columns: list[dict], stats: dict,
@@ -732,7 +804,10 @@ async def _dashboard_profile(snapshot_id: str, columns: list[dict], stats: dict,
     # one round trip; needed to tell a grouping column from an identifier, and
     # an outcome column from a column merely named like one
     col_stats = await repo.column_stats(snapshot_id, columns)
-    shape = prof.describe(columns, stats.get("totals", {}), col_stats, rows)
+    # the raw per-column sums: the run profile looks up `Pass` and `Fail`
+    # by the sheet's own names, not by a logical measure
+    shape = prof.describe(columns, stats.get("rawTotals", stats.get("totals", {})),
+                          col_stats, rows)
     if shape["kind"] == "volume":
         return shape
 

@@ -68,6 +68,49 @@ SERIAL_LABEL = re.compile(
     r"\b(no|nos|num|number|s\.?\s*no|sr|serial)\.?\s*$|^#", re.IGNORECASE)
 
 
+# --- columns that mean the same quantity ---------------------------------
+# Two workbooks feeding one testing type often count the same thing under
+# different headers — "Test Count" in one, "Test Cases" in the other — and
+# keying a measure on the column name made those two separate totals. Then a
+# section from the second file read 0 against the first file's column, which is
+# not a small number: it is the wrong question.
+#
+# A whitelist rather than a pattern, deliberately. These are the forms real
+# sheets use and nothing else folds in, so widening it is a decision somebody
+# makes on purpose. `Automated Test Count` is the case that makes a loose
+# pattern dangerous: it contains "Test Count" and is a different quantity —
+# the automated subset, which the benchmark reads on its own.
+TOTAL_TEST_FORMS = frozenset({
+    ("test", "count"), ("test", "counts"), ("test", "cases"), ("test", "case"),
+    ("tests",), ("testcount",), ("testcases",),
+    ("tc", "count"), ("tc", "cases"), ("tc", "counts"),
+    ("total", "test", "count"), ("total", "test", "counts"),
+    ("total", "test", "cases"), ("total", "test", "case"),
+    ("total", "tests"), ("total", "cases"), ("total", "case"),
+    ("no", "of", "test", "cases"), ("no", "of", "tests"),
+    ("number", "of", "test", "cases"), ("number", "of", "tests"),
+})
+# What the combined measure is called on screen. Reads correctly wherever a
+# label is used: the card renders "Total " + this, lowercased.
+TOTAL_TESTS = {"key": "total_tests", "label": "Test count", "type": "number"}
+
+
+def _words(label: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z]+", str(label).lower()))
+
+
+def measure_identity(column: dict) -> tuple[str, str]:
+    """The logical measure a column contributes to, as `(key, label)`.
+
+    A recognised total-test-count column answers to one shared key whatever its
+    header says, so two files counting the same thing produce one figure. Every
+    other column keeps its own identity — nothing is merged on a guess.
+    """
+    if _words(column.get("label", "")) in TOTAL_TEST_FORMS:
+        return TOTAL_TESTS["key"], TOTAL_TESTS["label"]
+    return column["key"], column.get("label", column["key"])
+
+
 def _numeric(columns: list[dict]) -> list[dict]:
     return [c for c in columns if c.get("type") == "number"]
 

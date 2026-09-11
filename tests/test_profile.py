@@ -449,6 +449,43 @@ def test_a_counting_sheet_is_still_volume_with_stats_available():
     assert shape["status"] is None
 
 
+# --- columns that mean the same quantity ---------------------------------
+# Two sheets counting test cases under different headers are counting the same
+# thing. Keying the measure on the column name made two totals, and then a
+# section from the second sheet read 0 against the first sheet's column.
+
+
+@pytest.mark.parametrize("label", [
+    "Test Count", "Test Cases", "Test count", "test cases", "TC count",
+    "TC Cases", "Total Test Count", "Total Cases", "Total Tests", "Tests",
+    "No. of test cases", "Number of Tests",
+])
+def test_every_known_form_of_total_test_count_is_one_measure(label):
+    key, shown = prof.measure_identity({"key": "whatever", "label": label,
+                                        "type": "number"})
+    assert key == "total_tests"
+    assert shown == "Test count"
+
+
+@pytest.mark.parametrize("label", [
+    "Automated Test Count", "Automated Cases", "Pass", "Fail", "NA", "%age",
+    "Pattern No.", "Passed Tests", "Failed Cases", "Blocked Count",
+])
+def test_nothing_else_folds_in(label):
+    """`Automated Test Count` is the case that makes a loose pattern dangerous:
+    it contains "Test Count" and is a different quantity."""
+    key, shown = prof.measure_identity({"key": "some_key", "label": label,
+                                        "type": "number"})
+    assert key == "some_key"
+    assert shown == label
+
+
+def test_an_unrecognised_column_keeps_its_own_identity():
+    key, shown = prof.measure_identity({"key": "defects_found",
+                                        "label": "Defects found", "type": "number"})
+    assert (key, shown) == ("defects_found", "Defects found")
+
+
 # --- a list of things, with nothing to count -----------------------------
 
 FEATURE_COLUMNS = cols(("ID", "string"), ("Summary (cellSens)", "string"),

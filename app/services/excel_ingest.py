@@ -38,13 +38,21 @@ import hashlib
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 
 from openpyxl import load_workbook
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 20_000
+# Enough discarded rows to describe what happened without carrying a whole
+# second copy of a sheet that repeats itself; the count is never capped.
+MAX_DROPPED_DETAIL = 25
+# How much of a column has to be numeric before the column counts as a number.
+# Not all of it: a column of counts with one cell reading "Not Decided" is still
+# a column of counts, and letting one word deny it made the stray cell decide
+# how every row in the sheet was identified.
+NUMERIC_SHARE = 0.6
 
 Cell = str | int | float | None
 
@@ -76,6 +84,15 @@ class ParsedSheet:
     identity_keys: list[str]  # the columns row identity is built from
     total_rows: int  # data rows before dedup
     duplicates_skipped: int
+
+    # --- what the read threw away -------------------------------------
+    # Parsing is lossy on purpose: duplicates collapse, separator rows go,
+    # a missing header becomes numbered columns. Each of those is defensible
+    # and each is invisible afterwards, so the facts are recorded here for a
+    # quality report to speak from. Nothing else reads them.
+    dropped_duplicates: list[dict] = field(default_factory=list)
+    dropped_separators: int = 0
+    headerless: bool = False
 
     @property
     def content_hash(self) -> str:
@@ -327,17 +344,27 @@ def parse_workbook(data: bytes) -> ParsedSheet:
                           f"The sheet has {len(data_rows)} data rows (limit {MAX_ROWS})")
 
     keys = [c["key"] for c in columns]
+    # What a column holds. Decided by the majority of its filled cells, not by
+    # unanimity: a count column with one cell reading "Not Decided" is still a
+    # count column. Nothing is rewritten — the stray stays exactly as it was
+    # typed, and every total steps over it.
     for i, col in enumerate(columns):
-        col_values = [row[i] for _, row in data_rows if row[i] is not None]
-        if col_values and all(isinstance(v, (int, float)) for v in col_values):
+        filled = [row[i] for _, row in data_rows if row[i] is not None]
+        numeric = sum(1 for v in filled if isinstance(v, (int, float)))
+        if filled and numeric / len(filled) >= NUMERIC_SHARE:
             col["type"] = "number"
 
     # drop separator/junk rows that carry no measure at all (every numeric
     # column empty) — but only when the sheet has numeric columns to judge by
     numeric_idx = [i for i, c in enumerate(columns) if c["type"] == "number"]
+    dropped_separators = 0
     if numeric_idx:
-        data_rows = [(s, row) for s, row in data_rows
+        kept_rows = [(s, row) for s, row in data_rows
                      if any(row[i] is not None for i in numeric_idx)]
+        # counted because this filter runs *before* total_rows, so without it
+        # a discarded row leaves no trace anywhere — not even in the total
+        dropped_separators = len(data_rows) - len(kept_rows)
+        data_rows = kept_rows
     if not data_rows:
         raise IngestError("empty_sheet", "The sheet contains no data rows")
     for row_section, _ in data_rows:
@@ -345,19 +372,43 @@ def parse_workbook(data: bytes) -> ParsedSheet:
             sections.append(row_section)
     sections = [s for s in sections if any(rs == s for rs, _ in data_rows)]
 
-    identity_keys = [c["key"] for c in columns if c["type"] == "string"] or keys
+    # What a row *is*, decided separately from what its columns hold.
+    #
+    # Measures are excluded, and that is the whole point: a row is the same row
+    # when its numbers change, which is what lets a reload update it instead of
+    # replacing it. Reading identity straight off "which columns are text" made
+    # the two decisions one, so a single word in a count column moved the
+    # measure into the row key and every later edit read as a delete plus an
+    # insert. Identity now follows the column's role, and a role no longer
+    # turns on one cell.
+    measures = [c["key"] for c in columns if c["type"] == "number"]
+    identity_keys = [k for k in keys if k not in set(measures)] or keys
     rows: list[ParsedRow] = []
-    seen_keys: set[str] = set()
+    kept_by_key: dict[str, dict] = {}
     duplicates = 0
+    dropped: list[dict] = []
     for row_section, row in data_rows:
         values = dict(zip(keys, row))
         key = _row_key(row_section, values, identity_keys)
-        if key in seen_keys:
+        if key in kept_by_key:
             duplicates += 1
+            # Whether the dropped row *agreed* with the one kept is the whole
+            # question: identical rows cost nothing, while a row that differed
+            # in its numbers took those numbers with it. Identity ignores the
+            # measures, so only comparing them here can tell the two apart.
+            kept = kept_by_key[key]
+            conflicts = {m: [kept.get(m), values.get(m)] for m in measures
+                         if kept.get(m) != values.get(m)}
+            if len(dropped) < MAX_DROPPED_DETAIL:
+                dropped.append({"section": row_section, "kept": kept,
+                                "dropped": values, "conflicts": conflicts})
             continue
-        seen_keys.add(key)
+        kept_by_key[key] = values
         rows.append(ParsedRow(section=row_section, values=values, row_key=key))
 
     return ParsedSheet(columns=columns, sections=sections, rows=rows,
                        identity_keys=identity_keys,
-                       total_rows=len(data_rows), duplicates_skipped=duplicates)
+                       total_rows=len(data_rows), duplicates_skipped=duplicates,
+                       dropped_duplicates=dropped,
+                       dropped_separators=dropped_separators,
+                       headerless=header_idx is None)

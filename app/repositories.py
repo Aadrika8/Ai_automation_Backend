@@ -19,6 +19,7 @@ from pathlib import PurePosixPath
 from pymongo import UpdateOne
 
 from app.db import get_db
+from app.services import profile as prof
 from app.layer_defaults import layer_id as layer_key
 
 
@@ -449,6 +450,26 @@ async def create_snapshot(doc: dict, rows: list) -> dict:
     return stored
 
 
+async def move_file_series(app_id: str, release_id: str, layer_id: str,
+                           old_file: str, new_file: str) -> int:
+    """Carry one workbook's whole history onto its new name.
+
+    A rename does not make new data, so it must not make a new dataset: the
+    snapshots keep their sequence numbers, their rows and their diffs, and only
+    the name they are filed under moves. Left to fork instead, the old series
+    would keep being counted alongside the new one and the layer's record count
+    would double.
+
+    Values are never touched — this restamps an identity, the way
+    `update_snapshot_period` restamps a month.
+    """
+    db = get_db()
+    scope = _scope(app_id, release_id, layer_id, old_file)
+    moved = await db.snapshots.update_many(scope, {"$set": {"file": new_file}})
+    await db.layer_records.update_many(scope, {"$set": {"file": new_file}})
+    return moved.modified_count
+
+
 async def update_snapshot_period(app_id: str, release_id: str, snapshot_id: str,
                                  period: dict) -> None:
     """Correct the month a snapshot is filed under. Its data never changes."""
@@ -521,27 +542,45 @@ async def aggregate_dashboard(snapshot_id: str, columns: list[dict]) -> dict:
         {"$match": scope}, {"$group": group}, {"$sort": {"_id": 1}},
     ])
     per_section = await section_cursor.to_list(None)
+
+    # One sheet has one name per measure, so there is nothing to fold here —
+    # but the measure is reported under the same logical name the merged view
+    # uses, so a card does not change its title when you switch between them.
+    identity = {c["key"]: prof.measure_identity(c) for c in numeric}
+    shown = [{"key": identity[c["key"]][0], "label": identity[c["key"]][1],
+              "type": "number"} for c in numeric]
+
     by_section = [
         {"section": s["_id"], "rowCount": s["rowCount"],
-         "sums": {c["key"]: s.get(c["key"]) or 0 for c in numeric}}
+         "sums": {identity[c["key"]][0]: s.get(c["key"]) or 0 for c in numeric}}
         for s in per_section
     ]
-    totals = {c["key"]: sum(s["sums"][c["key"]] for s in by_section) for c in numeric}
+    totals = {m["key"]: sum(s["sums"][m["key"]] for s in by_section) for m in shown}
     total_rows = sum(s["rowCount"] for s in by_section)
 
     top_rows = []
     if numeric:
         primary = numeric[-1]["key"]  # rightmost numeric column is the measure
         string_keys = [c["key"] for c in columns if c["type"] == "string"]
-        docs = await db.layer_records.find(scope, projection={"section": 1, "data": 1}) \
-            .sort(f"data.{primary}", -1).limit(10).to_list(None)
+        # A measure column may hold the odd cell that is not a number, and
+        # MongoDB sorts a string above every number — so the largest rows would
+        # open with "Not Decided". Rank only what can be ranked.
+        docs = await db.layer_records.find(
+            {**scope, f"data.{primary}": {"$type": "number"}},
+            projection={"section": 1, "data": 1}
+        ).sort(f"data.{primary}", -1).limit(10).to_list(None)
         for d in docs:
             label = " · ".join(str(d["data"].get(k)) for k in string_keys if d["data"].get(k))
             top_rows.append({"section": d["section"], "label": label or d["section"],
                              "value": d["data"].get(primary) or 0})
     return {"totalRows": total_rows, "sectionCount": len(by_section),
-            "numericColumns": numeric, "totals": totals,
-            "bySection": by_section, "topRows": top_rows}
+            "numericColumns": shown, "totals": totals,
+            "bySection": by_section, "topRows": top_rows,
+            # keyed by the sheet's own column names, for the callers that read
+            # a specific column — the run-results profile looks up `Pass` and
+            # `Fail`, not a logical measure. Not part of the wire shape.
+            "rawTotals": {c["key"]: sum(s.get(c["key"]) or 0 for s in per_section)
+                          for c in numeric}}
 
 
 SAMPLE_VALUES = 25
@@ -691,10 +730,12 @@ async def aggregate_merged_dashboard(app_id: str, release_id: str,
     Nothing is written: the records stay exactly where they are, one file per
     snapshot. This only adds their numbers up for a combined view.
 
-    Measures are the union of the numeric columns the files carry, each summed
-    over the files that actually have it. Largest-rows needs one measure the
-    files agree on, so it is offered only when they share at least one; ranking
-    a `test_count` against a `test_cases` would be meaningless.
+    Columns that mean the same quantity are one measure, whatever each sheet
+    calls it. Two workbooks counting test cases under `Test Count` and
+    `Test Cases` used to produce two separate totals, and then a section from
+    the second file read 0 against the first file's column — a wrong number
+    rather than a missing one. Which labels count as equivalent is a whitelist
+    in `profile.measure_identity`, so nothing folds together on a guess.
     """
     db = get_db()
     current = await list_current_snapshots(app_id, release_id, layer_id)
@@ -703,50 +744,78 @@ async def aggregate_merged_dashboard(app_id: str, release_id: str,
                 "totals": {}, "bySection": [], "topRows": []}
 
     ids = [doc["_id"] for doc in current]
-    numeric: dict[str, dict] = {}
-    shared: set[str] | None = None
+
+    # Each logical measure and the source columns feeding it. `sources` is what
+    # makes the fold possible: the rows still hold whatever their own sheet
+    # called the column, so the sum is taken per column and added up after.
+    measures: dict[str, dict] = {}
+    per_file: list[set[str]] = []
     for doc in current:
-        keys = {c["key"] for c in doc.get("columns", []) if c["type"] == "number"}
-        shared = keys if shared is None else (shared & keys)
+        mine: set[str] = set()
         for col in doc.get("columns", []):
-            if col["type"] == "number":
-                numeric.setdefault(col["key"], dict(col))
-    ordered = list(numeric.values())
+            if col.get("type") != "number":
+                continue
+            key, label = prof.measure_identity(col)
+            entry = measures.setdefault(
+                key, {"key": key, "label": label, "type": "number", "sources": []})
+            if col["key"] not in entry["sources"]:
+                entry["sources"].append(col["key"])
+            mine.add(key)
+        per_file.append(mine)
+
+    # a measure every file carries — after folding, so the two names above
+    # count as the same thing and largest-rows is offered again
+    shared = set.intersection(*per_file) if per_file else set()
+    ordered = list(measures.values())
+    source_keys = [k for m in ordered for k in m["sources"]]
 
     scope = {"snapshotId": {"$in": ids}}
     group: dict = {"_id": "$section", "rowCount": {"$sum": 1}}
-    for col in ordered:
-        group[col["key"]] = {"$sum": f"$data.{col['key']}"}
+    for key in source_keys:
+        group[key] = {"$sum": f"$data.{key}"}
     cursor = await db.layer_records.aggregate([
         {"$match": scope}, {"$group": group}, {"$sort": {"_id": 1}},
     ])
     per_section = await cursor.to_list(None)
+
+    def folded(bucket: dict) -> dict:
+        return {m["key"]: sum(bucket.get(k) or 0 for k in m["sources"])
+                for m in ordered}
+
     by_section = [
-        {"section": s["_id"], "rowCount": s["rowCount"],
-         "sums": {c["key"]: s.get(c["key"]) or 0 for c in ordered}}
+        {"section": s["_id"], "rowCount": s["rowCount"], "sums": folded(s)}
         for s in per_section
     ]
-    totals = {c["key"]: sum(s["sums"][c["key"]] for s in by_section) for c in ordered}
+    totals = {m["key"]: sum(s["sums"][m["key"]] for s in by_section) for m in ordered}
     total_rows = sum(s["rowCount"] for s in by_section)
 
     top_rows: list[dict] = []
-    if shared:
-        primary = next((c["key"] for c in reversed(ordered) if c["key"] in shared), None)
-        if primary:
-            string_keys = [c["key"] for doc in current
-                           for c in doc.get("columns", []) if c["type"] == "string"]
+    primary = next((m for m in reversed(ordered) if m["key"] in shared), None)
+    if primary:
+        string_keys = [c["key"] for doc in current
+                       for c in doc.get("columns", []) if c["type"] == "string"]
+        # ranked per source column and merged here, because one row carries the
+        # measure under its own sheet's name and no other
+        found: list[tuple[float, dict]] = []
+        for key in primary["sources"]:
             docs = await db.layer_records.find(
-                scope, projection={"section": 1, "data": 1, "file": 1}
-            ).sort(f"data.{primary}", -1).limit(10).to_list(None)
-            for d in docs:
-                label = " · ".join(
-                    str(d["data"].get(k)) for k in dict.fromkeys(string_keys)
-                    if d["data"].get(k))
-                top_rows.append({"section": d["section"],
-                                 "label": label or d["section"],
-                                 "value": d["data"].get(primary) or 0})
+                {**scope, f"data.{key}": {"$type": "number"}},
+                projection={"section": 1, "data": 1, "file": 1}
+            ).sort(f"data.{key}", -1).limit(10).to_list(None)
+            found += [(float(d["data"][key]), d) for d in docs]
+        found.sort(key=lambda pair: -pair[0])
+        for value, d in found[:10]:
+            label = " · ".join(
+                str(d["data"].get(k)) for k in dict.fromkeys(string_keys)
+                if d["data"].get(k))
+            top_rows.append({"section": d["section"],
+                             "label": label or d["section"], "value": value})
+
+    # `sources` is internal bookkeeping; the wire shape stays a column list
+    columns_out = [{"key": m["key"], "label": m["label"], "type": "number"}
+                   for m in ordered]
     return {"totalRows": total_rows, "sectionCount": len(by_section),
-            "numericColumns": ordered, "totals": totals,
+            "numericColumns": columns_out, "totals": totals,
             "bySection": by_section, "topRows": top_rows}
 
 

@@ -245,8 +245,10 @@ async def test_releases_hold_differently_shaped_data_side_by_side(
                                  headers=qa_headers)).json()
     new_dash = (await client.get(api(NEW, "/layers/system/dashboard"),
                                  headers=qa_headers)).json()
-    assert old_dash["totals"] == {"test_count": 35}
-    assert new_dash["totals"] == {"pattern_no": 3, "tc_count": 100, "pass": 95}
+    assert old_dash["totals"] == {"total_tests": 35}
+    # `TC count` reports under the shared measure; the record columns
+    # above still carry the sheet's own names
+    assert new_dash["totals"] == {"pattern_no": 3, "total_tests": 100, "pass": 95}
 
     # per-release record counts roll up to the release list
     releases = (await client.get("/api/apps/cellsens/releases", headers=qa_headers)).json()

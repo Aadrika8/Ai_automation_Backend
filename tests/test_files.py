@@ -91,11 +91,14 @@ async def test_metrics_are_per_file_and_never_totalled(client, qa_headers, two_f
     a = (await client.get(f"{DASHBOARD}?file={A}", headers=qa_headers)).json()
     b = (await client.get(f"{DASHBOARD}?file={B}", headers=qa_headers)).json()
 
-    assert a["totals"] == {"test_count": 30}
-    assert b["totals"] == {"pattern_no": 6, "tc_count": 112}
+    # both sheets count test cases, so both report the same logical measure —
+    # under each sheet's own numbers, because they are separate datasets
+    assert a["totals"] == {"total_tests": 30}
+    assert b["totals"] == {"pattern_no": 6, "total_tests": 112}
     assert a["totalRows"] == 2 and b["totalRows"] == 3
-    # the two measure sets have nothing in common — there is no combined view
-    assert set(a["totals"]) & set(b["totals"]) == set()
+    # neither has been told about the other: no figure here is a sum of both
+    assert a["totals"]["total_tests"] != b["totals"]["total_tests"]
+    assert "pattern_no" not in a["totals"]
 
 
 async def test_history_is_the_selected_file_s_timeline(
@@ -180,35 +183,43 @@ async def test_the_layer_count_sums_files_for_the_pyramid_only(
     assert (await client.get(RECORDS, headers=qa_headers)).json()["total"] == 3
 
 
-async def test_a_renamed_file_starts_a_new_series(client, qa_headers, two_files):
-    """Renaming a workbook makes it a new dataset; the old one keeps its
-    history under its old name."""
+async def test_a_renamed_file_moves_its_history(client, qa_headers, two_files):
+    """Renaming a workbook is not new data, so it must not make a new dataset.
+
+    Left to fork, the old name would keep a current snapshot of its own and the
+    layer would count the same rows twice — which then feeds the pyramid check.
+    """
     (two_files / "part-a.xlsx").rename(two_files / "part-a-renamed.xlsx")
     renamed = "system/part-a-renamed.xlsx"
     res = await client.post(SNAPSHOTS, headers=qa_headers,
                             json={"period": SEPTEMBER,
                                   "layers": [{"layerId": "system", "files": [renamed]}]})
     new = next(f for f in res.json()["files"] if f["file"] == renamed)
-    assert new["created"] is True and new["sequence"] == 1
+    assert new["created"] is False                      # nothing was written
+    assert new["renamedFrom"] == A
+    assert "Renamed from part-a.xlsx" in new["reason"]
 
     files = {f["file"]: f for f in (await client.get(FILES, headers=qa_headers)).json()}
-    assert set(files) == {A, B, renamed}
-    assert files[A]["rowCount"] == 2                    # old history preserved
-    assert files[renamed]["rowCount"] == 2
+    assert set(files) == {B, renamed}                   # the old name is gone
+    assert files[renamed]["rowCount"] == 2              # its history came across
+    assert files[renamed]["sequence"] == 1
 
 
 # --- the merged dashboard: a read-time view, never stored data ------------
 
 
 async def test_merged_dashboard_adds_the_files_up(client, qa_headers, two_files):
-    """The dashboard can total every file's current snapshot. The two sheets
-    here share no measures, so the merged view carries both sets side by
-    side — each summed over the files that actually have it."""
+    """The dashboard can total every file's current snapshot.
+
+    `Test Count` in one sheet and `TC count` in the other are the same
+    quantity under two headers, so they fold into one measure. `Pattern No.`
+    is nothing of the kind and keeps its own identity.
+    """
     merged = (await client.get(f"{DASHBOARD}?merged=true", headers=qa_headers)).json()
     assert merged["merged"] is True
     assert merged["snapshot"] is None
     assert merged["totalRows"] == 5                      # 2 + 3
-    assert merged["totals"] == {"test_count": 30, "pattern_no": 6, "tc_count": 112}
+    assert merged["totals"] == {"total_tests": 142, "pattern_no": 6}  # 30 + 112
     assert sorted(f["file"] for f in merged["mergedFiles"]) == [A, B]
 
 
@@ -219,8 +230,10 @@ async def test_merged_measures_agree_with_the_files_read_singly(
     merged = (await client.get(f"{DASHBOARD}?merged=true", headers=qa_headers)).json()
 
     assert merged["totalRows"] == a["totalRows"] + b["totalRows"]
-    for key, total in {**a["totals"], **b["totals"]}.items():
-        assert merged["totals"][key] == total
+    # every measure, merged, is exactly the sum of the files that carry it —
+    # including one the two sheets name differently
+    for key in set(a["totals"]) | set(b["totals"]):
+        assert merged["totals"][key] == a["totals"].get(key, 0) + b["totals"].get(key, 0)
 
 
 async def test_merging_writes_nothing(client, qa_headers, admin_headers, two_files):
@@ -245,10 +258,100 @@ async def test_merging_writes_nothing(client, qa_headers, admin_headers, two_fil
     assert len((await client.get(HISTORY, headers=qa_headers)).json()) == 2
 
 
+async def test_two_files_counting_the_same_thing_make_one_total(
+        client, admin_headers, qa_headers, two_files):
+    """`Test Count` in one sheet and `Test Cases` in the other are the same
+    quantity. Keyed on the column name they made two separate totals, and then
+    a section from the second file reported 0 against the first file's column
+    — a wrong number rather than a missing one.
+    """
+    (two_files / "part-c.xlsx").write_bytes(build_workbook([
+        ["Suite", "Test Cases"],          # a different header for the same thing
+        ["licensing", 7],
+    ]))
+    res = await client.post(SNAPSHOTS, headers=qa_headers,
+                            json={"period": SEPTEMBER,
+                                  "layers": [{"layerId": "system",
+                                              "files": ["system/part-c.xlsx"]}]})
+    assert res.status_code == 200, res.text
+
+    body = (await client.get(f"{DASHBOARD}?merged=true", headers=qa_headers)).json()
+
+    # three headers for test cases across three files, one measure
+    shown = {c["key"]: c["label"] for c in body["numericColumns"]}
+    assert shown["total_tests"] == "Test count"
+    assert body["totals"]["total_tests"] == 149     # 30 + 112 + 7
+
+    # and no section reads zero for using another file's name for it
+    per_section = {s["section"]: s["sums"]["total_tests"] for s in body["bySection"]}
+    assert per_section["Camera testing"] == 30      # part-a, `Test Count`
+    assert per_section["General"] == 119            # part-b `TC count` + part-c `Test Cases`
+
+
+async def test_a_section_is_never_zero_for_using_the_other_name(
+        client, qa_headers, two_files):
+    """The bug this closes: part-c's rows measure `Test Cases`, so against a
+    `Test Count` key they summed to nothing and the chart drew a zero bar."""
+    (two_files / "part-c.xlsx").write_bytes(build_workbook([
+        ["Suite", "Total Cases"], ["licensing", 7]]))
+    await client.post(SNAPSHOTS, headers=qa_headers,
+                      json={"period": SEPTEMBER,
+                            "layers": [{"layerId": "system",
+                                        "files": ["system/part-c.xlsx"]}]})
+    body = (await client.get(f"{DASHBOARD}?merged=true", headers=qa_headers)).json()
+    assert all(s["sums"]["total_tests"] > 0 for s in body["bySection"])
+
+
+async def test_folding_restores_the_largest_rows_panel(
+        client, qa_headers, two_files):
+    """Largest-rows needs a measure every file carries. Before the fold these
+    two counted the same thing under different names and shared none, so the
+    panel was withheld."""
+    (two_files / "part-c.xlsx").write_bytes(build_workbook([
+        ["Suite", "Test Cases"], ["licensing", 7]]))
+    await client.post(SNAPSHOTS, headers=qa_headers,
+                      json={"period": SEPTEMBER,
+                            "layers": [{"layerId": "system",
+                                        "files": ["system/part-c.xlsx"]}]})
+    body = (await client.get(f"{DASHBOARD}?merged=true", headers=qa_headers)).json()
+    assert body["topRows"], "the panel should be offered once a measure is shared"
+    # ranked across every file, so the biggest row wins whichever sheet it is in
+    assert body["topRows"][0]["value"] == 57        # part-b, under `TC count`
+    assert [r["value"] for r in body["topRows"]][:4] == [57, 43, 20, 12]
+
+
+async def test_an_automated_count_is_not_folded_into_the_total(
+        client, qa_headers, two_files):
+    """It contains "Test Count" and is a different quantity — the automated
+    subset, which the benchmark reads on its own."""
+    (two_files / "part-c.xlsx").write_bytes(build_workbook([
+        ["Suite", "Test Count", "Automated Test Count"],
+        ["licensing", 10, 4]]))
+    await client.post(SNAPSHOTS, headers=qa_headers,
+                      json={"period": SEPTEMBER,
+                            "layers": [{"layerId": "system",
+                                        "files": ["system/part-c.xlsx"]}]})
+    body = (await client.get(f"{DASHBOARD}?merged=true", headers=qa_headers)).json()
+    keys = {c["key"] for c in body["numericColumns"]}
+    assert "total_tests" in keys
+    assert "automated_test_count" in keys       # kept as its own measure
+    assert body["totals"]["automated_test_count"] == 4
+
+
 async def test_merged_largest_rows_need_a_shared_measure(client, qa_headers, two_files):
-    """Ranking a `test_count` against a `tc_count` would be meaningless, so
-    largest-rows is offered only when the files share a measure."""
+    """Ranking a test count against a defect count would be meaningless, so
+    largest-rows is offered only when the files share a measure.
+
+    It takes two genuinely different quantities to show this: `Test Count` and
+    `TC count` are the same measure under two names and do share.
+    """
+    (two_files / "part-b.xlsx").write_bytes(build_workbook([
+        ["Area", "Defects found"], ["licensing", 4]]))
+    await client.post(SNAPSHOTS, headers=qa_headers,
+                      json={"period": SEPTEMBER,
+                            "layers": [{"layerId": "system", "files": [A, B]}]})
     unshared = (await client.get(f"{DASHBOARD}?merged=true", headers=qa_headers)).json()
+    assert {c["key"] for c in unshared["numericColumns"]} == {"total_tests", "defects_found"}
     assert unshared["topRows"] == []
 
     # give the second file the same shape as the first — now they can be ranked
@@ -263,7 +366,7 @@ async def test_merged_largest_rows_need_a_shared_measure(client, qa_headers, two
                             "layers": [{"layerId": "system", "files": [A, B]}]})
 
     shared = (await client.get(f"{DASHBOARD}?merged=true", headers=qa_headers)).json()
-    assert shared["totals"] == {"test_count": 129}        # 10 + 20 + 99
+    assert shared["totals"] == {"total_tests": 129}       # 10 + 20 + 99
     assert shared["topRows"][0]["value"] == 99
     assert len(shared["topRows"]) == 3
     # still two datasets underneath, still unmerged in storage

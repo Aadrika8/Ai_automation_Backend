@@ -169,9 +169,9 @@ async def test_the_earlier_snapshot_keeps_its_numbers(client, qa_headers, folder
 
     old_dash = (await client.get(f"{DASHBOARD}?snapshot={first['id']}",
                                  headers=qa_headers)).json()
-    assert old_dash["totals"] == {"test_count": 35}
+    assert old_dash["totals"] == {"total_tests": 35}
     assert (await client.get(DASHBOARD, headers=qa_headers)).json()["totals"] == {
-        "test_count": 7}
+        "total_tests": 7}
 
 
 async def test_rows_removed_from_the_sheet_leave_the_current_snapshot(
@@ -247,7 +247,7 @@ async def test_real_file_end_to_end(client, qa_headers, folder):
     assert body["rowCount"] == 206
     assert body["duplicatesSkipped"] == 12
     dash = (await client.get(DASHBOARD, headers=qa_headers)).json()
-    assert dash["totals"] == {"test_count": 140736}
+    assert dash["totals"] == {"total_tests": 140736}
 
 
 # --- periods -------------------------------------------------------------
@@ -407,9 +407,9 @@ async def test_dashboard_aggregates(client, qa_headers, folder):
     body = (await client.get(DASHBOARD, headers=qa_headers)).json()
     assert body["totalRows"] == 3
     assert body["sectionCount"] == 2
-    assert body["totals"] == {"test_count": 35}
+    assert body["totals"] == {"total_tests": 35}
     camera = next(s for s in body["bySection"] if s["section"] == "Camera testing")
-    assert camera["sums"] == {"test_count": 30}
+    assert camera["sums"] == {"total_tests": 30}
     assert body["topRows"][0]["value"] == 20
     assert body["snapshot"]["sequence"] == 1
 
