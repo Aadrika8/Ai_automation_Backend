@@ -1,35 +1,4 @@
-"""What is wrong with one workbook, judged on its own.
 
-Reading a sheet is lossy on purpose. Duplicate rows collapse, rows carrying no
-measure are dropped as separators, a sheet with no header gets numbered
-columns, and a column with one stray word in it stops being a number. Each of
-those is the right call, and each is invisible afterwards — the real
-regression workbook reads 218 rows and stores 206, and nothing anywhere said
-so.
-
-This module says so. It looks at exactly one parse and reports what that read
-cost, in terms of the sheet rather than of the parser: what was lost, why, and
-which cell to go and look at.
-
-One check here is not about loss. A sheet keyed on identifiers can contradict
-itself — a row keyed `FL-5777` whose text reads `CS-4800 - FL-5778 PBI: …`
-names two different features and cannot be right about both. Nothing is
-dropped and no total moves, so it would be invisible under the rule above; it
-is reported because the row is attached to whichever id the *column* holds, and
-if that is the stale half then the work is counted against the wrong feature.
-
-**Nothing here compares against a previous load.** A warning is a property of
-the file, so it is the same answer on the first read as on the fifth, in any
-release, under any layer. The comparison between readings already exists as
-`snapshot.diff` and is a different question.
-
-**Nothing here blocks.** A load that refuses leaves the reader with nothing to
-act on; one that runs and says what looked wrong leaves them with a task. Two
-severities carry that distinction and no more:
-
-    problem — data was lost, or a figure on screen is now wrong
-    notice  — worth a look, nothing was lost
-"""
 import re
 from collections import Counter
 from typing import Any
@@ -66,7 +35,6 @@ ORDER = [
     "mismatched_id",
     "duplicate_rows",
     "separator_rows",
-    "unknown_id_reference",
     "empty_columns",
     "sparse_columns",
     "no_header",
@@ -249,7 +217,7 @@ def _structure(parsed: ParsedSheet) -> list[dict]:
     return out
 
 
-def _id_references(parsed: ParsedSheet) -> list[dict]:
+def id_references(id_key: str, rows: list[dict]) -> dict | None:
     """Rows whose text names an identifier of the sheet’s own family.
 
     The identifier is the first column’s first token, by the same rule the
@@ -260,49 +228,53 @@ def _id_references(parsed: ParsedSheet) -> list[dict]:
 
     Two findings, because pointing inside the sheet and pointing outside it
     mean opposite things. `FL-5777` naming `FL-5778`, a feature sitting a few
-    rows above it, is a copy of a neighbouring row whose id was never changed.
-    `FL-5786` naming `FL-5651`, which this release does not contain, reads as
-    the earlier feature it follows on from, and calling that an error would be
-    wrong.
+    rows above it, is a copy of a neighbouring row whose id was never changed:
+    a fault in the file, reported with its warnings. `FL-5786` naming
+    `FL-5651`, which the sheet does not contain, reads as the earlier feature
+    it follows on from — a question about the release’s scope, which
+    Traceability answers.
 
     Two guards keep it quiet. A family fewer than half the rows carry is not a
     naming convention: the regression workbook is keyed on microscope models,
     and `IX3` falls out of part numbers like `IX3-D6REA` five times over. And a
     sheet where most rows name another id has a cross-reference column rather
     than a mistake in one.
-    """
-    if not parsed.rows or not parsed.columns:
-        return []
-    id_key = parsed.columns[0]["key"]
 
-    own: list[tuple[Any, str, str]] = []   # row, match key, as written
+    `rows` are one workbook’s rows as column -> value, in file order. Returns
+    the family and both lists — each entry `(own id, id named, the cell it was
+    named in)` — or None when there is nothing to compare or a guard holds.
+    """
+    if not rows or not id_key:
+        return None
+
+    own: list[tuple[dict, str, str]] = []   # row, match key, as written
     families: Counter = Counter()
-    for row in parsed.rows:
-        read = cov.read_identifier(row.values.get(id_key))
+    for values in rows:
+        read = cov.read_identifier(values.get(id_key))
         if read is None:
             continue
         key, display, family = read
-        own.append((row, key, display))
+        own.append((values, key, display))
         if family:
             families[family] += 1
     if not families:
-        return []
+        return None
 
     family, carrying = families.most_common(1)[0]
-    if carrying / len(parsed.rows) < MIN_IDENTIFIER_SHARE:
-        return []
+    if carrying / len(rows) < MIN_IDENTIFIER_SHARE:
+        return None
 
-    present = {key for _row, key, _display in own}
+    present = {key for _values, key, _display in own}
     inside: list[tuple[str, str, str]] = []
     outside: list[tuple[str, str, str]] = []
 
-    for row, key, display in own:
+    for values, key, display in own:
         if cov.family_of(display) != family:
             continue    # a stray id of another family is not this row’s key
         # one entry per distinct id named, so a cell repeating it down five
         # continuation lines is one finding rather than five
         named: dict[str, tuple[str, str]] = {}
-        for column, value in row.values.items():
+        for column, value in values.items():
             if value is None:
                 continue
             text = str(value)
@@ -319,33 +291,37 @@ def _id_references(parsed: ParsedSheet) -> list[dict]:
             bucket = inside if folded in present else outside
             bucket.append((display, token, snippet))
 
-    if len(inside) + len(outside) > MAX_MISMATCH_SHARE * len(parsed.rows):
+    if len(inside) + len(outside) > MAX_MISMATCH_SHARE * len(rows):
+        return None
+    return {"family": family, "inside": inside, "outside": outside}
+
+
+def _id_references(parsed: ParsedSheet) -> list[dict]:
+    """The in-sheet half of `id_references`, as a workbook warning.
+
+    A row naming another row of the same sheet is a contradiction inside the
+    file. A row naming an id the sheet does not contain is nothing wrong with
+    the file, so it is not reported here — Traceability lists it.
+    """
+    if not parsed.rows or not parsed.columns:
+        return []
+    found = id_references(parsed.columns[0]["key"], [row.values for row in parsed.rows])
+    if not found or not found["inside"]:
         return []
 
-    out: list[dict] = []
-    if inside:
-        first, other, snippet = inside[0]
-        more = (f" {len(inside) - 1} other row(s) do the same."
-                if len(inside) > 1 else "")
-        out.append(_warn(
-            "mismatched_id", "problem",
-            f"{len(inside)} row(s) name a different {family} id than their "
-            f"own. “{first}” reads “{snippet}”, and {other} is a separate row "
-            f"in this sheet — most likely a copy of a neighbouring row whose id "
-            f"was not changed.{more} Which half is stale is not something the "
-            f"sheet says: if the id is right the description is out of date, "
-            f"and if the description is right this row’s work is counted "
-            f"against the wrong {family} id."))
-    if outside:
-        named_ids = sorted({token for _first, token, _s in outside})
-        out.append(_warn(
-            "unknown_id_reference", "notice",
-            f"{len(outside)} row(s) reference {family} ids this sheet does "
-            f"not contain ({_name_list(named_ids)}). If those are earlier "
-            f"items the work follows on from, nothing is wrong; if they belong "
-            f"in this release, they are missing from it."))
-    return out
-
+    family, inside = found["family"], found["inside"]
+    first, other, snippet = inside[0]
+    more = (f" {len(inside) - 1} other row(s) do the same."
+            if len(inside) > 1 else "")
+    return [_warn(
+        "mismatched_id", "problem",
+        f"{len(inside)} row(s) name a different {family} id than their "
+        f"own. “{first}” reads “{snippet}”, and {other} is a separate row "
+        f"in this sheet — most likely a copy of a neighbouring row whose id "
+        f"was not changed.{more} Which half is stale is not something the "
+        f"sheet says: if the id is right the description is out of date, "
+        f"and if the description is right this row’s work is counted "
+        f"against the wrong {family} id.")]
 
 # --- the report ----------------------------------------------------------
 
