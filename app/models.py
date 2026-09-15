@@ -2,9 +2,9 @@
 Snake_case fields with camelCase aliases; FastAPI serializes by alias, so the
 wire format matches the frontend exactly."""
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 Role = Literal["manager", "qa", "admin"]
@@ -118,6 +118,10 @@ class LayerInfo(CamelModel):
     # Rows held right now, summed across this type's files. Summed only so the
     # testing pyramid has a figure to compare — no combined dataset exists.
     record_count: int = 0
+    # Test cases held right now: every file's total-test-count column, summed.
+    # None when any of this type's files has no such column (or two), so it is
+    # never a partial total — the pyramid then falls back to rows, and says so.
+    test_count: int | None = None
     file_count: int = 0
     snapshot_count: int = 0
     latest_snapshot_at: datetime | None = None
@@ -152,6 +156,21 @@ class QualityWarning(CamelModel):
     code: str
     severity: Literal["problem", "notice"]
     message: str
+
+
+# Found by the per-workbook check before it moved to Traceability: a feature
+# row naming a feature id its sheet does not contain is a question about the
+# release's scope, not a fault in the file. Snapshots saved before the move
+# still carry it, so it is dropped wherever saved warnings are read back out.
+MOVED_TO_TRACEABILITY = frozenset({"unknown_id_reference"})
+
+
+def _workbook_only(warnings: list[QualityWarning]) -> list[QualityWarning]:
+    return [w for w in warnings if w.code not in MOVED_TO_TRACEABILITY]
+
+
+# a workbook's own data-quality warnings, as saved with its snapshot
+WorkbookWarnings = Annotated[list[QualityWarning], AfterValidator(_workbook_only)]
 
 
 class SnapshotSource(CamelModel):
@@ -214,7 +233,7 @@ class SnapshotInfo(CamelModel):
     # what was wrong with the workbook when it was read. Kept with the reading
     # the way `diff` is, because the rows the parse discarded are gone and
     # these cannot be recomputed. Snapshots taken before the check carry none.
-    warnings: list[QualityWarning] = []
+    warnings: WorkbookWarnings = []
     # true only for snapshots migrated from before files were kept separate
     combined: bool = False
     created_at: datetime
@@ -411,7 +430,7 @@ class LayerDashboardResponse(CamelModel):
     by_section: list[SectionAggregate]
     top_rows: list[TopRow]
     # what was wrong with the workbook these figures came from
-    warnings: list[QualityWarning] = []
+    warnings: WorkbookWarnings = []
     # what kind of data this workbook holds, and so what to draw for it.
     # Defaults to the volume view, which is what every layer used to get.
     profile: DashboardProfile = DashboardProfile()
@@ -506,15 +525,13 @@ class SnapshotRunResult(CamelModel):
 
 
 class AppSettings(CamelModel):
-    # parent folder holding one sub-folder per application
+    # Parent folder holding one sub-folder per application — the one setting
+    # the application reads. An earlier git-runner design also kept a
+    # repository URL, branch, timeout, cache directory, hierarchy and file
+    # extensions here; nothing read them, so they are gone. A stored document
+    # that still carries them reads fine (unknown keys are ignored) and the
+    # next save replaces it without them.
     excel_root: str = ""
-    repo_url: str
-    branch: str
-    cache_dir: str
-    timeout_seconds: int
-    root_folder: str
-    levels: list[str]
-    extensions: list[str]
 
 
 class ManagedUser(CamelModel):
@@ -685,6 +702,32 @@ class CoverageWarning(CamelModel):
     message: str
 
 
+class OutsideReference(CamelModel):
+    """A feature row naming a feature id its own workbook does not list.
+
+    Read from the row's text, never matched on: it moves no coverage figure.
+    FL-5786 naming FL-5651 reads as the earlier feature it follows on from;
+    if FL-5651 belongs in this release, it is missing from it.
+    """
+    id: str                 # the row's own id, as the sheet spells it
+    names: str              # the id its text names
+    text: str = ""          # the cell it is named in
+    file_name: str = ""
+
+
+class IdMismatch(CamelModel):
+    """A feature row whose text names another row of the same workbook.
+
+    The load reports it as a fault in the file. Traceability lists it too:
+    the row is matched on the id in its first column, and if that is the stale
+    half, the match and the row's CS ids belong to the id its text names.
+    """
+    id: str                 # the row's own id — the one it is matched on
+    names: str              # the other row's id, named in its text
+    text: str = ""          # the cell it is named in
+    file_name: str = ""
+
+
 class CoverageResponse(CamelModel):
     configured: bool = False
     # set when the comparison could not run — an unloaded layer, say, or a
@@ -697,6 +740,10 @@ class CoverageResponse(CamelModel):
     summary: CoverageSummary = CoverageSummary()
     entries: list[CoverageEntry] = []
     warnings: list[CoverageWarning] = []
+    # feature rows naming a feature id their workbook does not list
+    outside_references: list[OutsideReference] = []
+    # feature rows whose text names another row of the same workbook
+    id_mismatches: list[IdMismatch] = []
 
 
 class TracePreview(CamelModel):

@@ -48,11 +48,4 @@ DEFAULT_SETTINGS = {
     # parent folder for the Excel catalog, e.g. r"A:\office excel files" or a
     # UNC share. Empty by default: an admin sets it in Settings.
     "excelRoot": "",
-    "repoUrl": "https://github.com/Aadrika8/test_suites.git",
-    "branch": "main",
-    "cacheDir": "~/TestRunner/cache",
-    "timeoutSeconds": 60,
-    "rootFolder": "test_suites",
-    "levels": ["application", "release", "suite"],
-    "extensions": [".py"],
 }

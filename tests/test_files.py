@@ -183,6 +183,78 @@ async def test_the_layer_count_sums_files_for_the_pyramid_only(
     assert (await client.get(RECORDS, headers=qa_headers)).json()["total"] == 3
 
 
+# --- the pyramid's figure: test cases, not rows ---------------------------
+#
+# A row is not a unit of testing. The real regression workbook holds 210 rows
+# and 140,789 test cases; acceptance 39 rows and 1,286. Compared by rows the
+# pyramid was answering a question nobody asked, under a label that said
+# "test cases". Each layer now also carries the sum of its files' total-test-
+# count column — but only where every file has exactly one, since a partial
+# total set against a complete one would be worse than no figure at all.
+
+
+async def load_extra(client, qa_headers, folder, rows):
+    (folder / "part-c.xlsx").write_bytes(build_workbook(rows))
+    await client.post(SNAPSHOTS, headers=qa_headers,
+                      json={"period": SEPTEMBER,
+                            "layers": [{"layerId": "system",
+                                        "files": ["system/part-c.xlsx"]}]})
+
+
+async def system_layer(client, qa_headers) -> dict:
+    layers = (await client.get(f"{RELEASE}/layers", headers=qa_headers)).json()
+    return next(l for l in layers if l["id"] == "system")
+
+
+async def test_the_layer_counts_its_test_cases_as_well_as_its_rows(
+        client, qa_headers, two_files):
+    """Part A says `Test Count` and part B says `TC count`; both are the one
+    measure, so the layer holds 30 + 112 test cases across its 5 rows."""
+    system = await system_layer(client, qa_headers)
+    assert system["recordCount"] == 5
+    assert system["testCount"] == 142
+
+
+async def test_a_file_without_a_test_count_leaves_the_layer_without_one(
+        client, qa_headers, two_files):
+    """142 would now be the count of two files out of three, shown as the
+    layer's. The pyramid falls back to rows instead, and says why."""
+    await load_extra(client, qa_headers, two_files,
+                     [["Suite", "Owner"], ["licensing", "Meera"]])
+    system = await system_layer(client, qa_headers)
+    assert system["recordCount"] == 6
+    assert system["testCount"] is None
+
+
+async def test_a_file_with_two_test_counts_is_not_guessed(
+        client, qa_headers, two_files):
+    """Summing both would count every case twice; picking one is a guess."""
+    await load_extra(client, qa_headers, two_files,
+                     [["Suite", "Test Count", "Total Tests"], ["licensing", 10, 10]])
+    assert (await system_layer(client, qa_headers))["testCount"] is None
+
+
+async def test_an_automated_count_is_not_a_test_count(
+        client, qa_headers, two_files):
+    """It names test counts and is a different quantity — the automated
+    subset. A file carrying only that has no total to give."""
+    await load_extra(client, qa_headers, two_files,
+                     [["Suite", "Automated Test Count"], ["licensing", 4]])
+    assert (await system_layer(client, qa_headers))["testCount"] is None
+
+
+async def test_a_stray_word_in_the_count_is_left_out_as_every_total_is(
+        client, qa_headers, two_files):
+    """Two numbers and a "Not Decided" still make a count column; the word
+    adds nothing, exactly as it adds nothing to the dashboard total."""
+    await load_extra(client, qa_headers, two_files,
+                     [["Suite", "Test Count"],
+                      ["licensing", 5], ["export", 7], ["import", "Not Decided"]])
+    system = await system_layer(client, qa_headers)
+    assert system["testCount"] == 142 + 12
+    assert system["recordCount"] == 8
+
+
 async def test_a_renamed_file_moves_its_history(client, qa_headers, two_files):
     """Renaming a workbook is not new data, so it must not make a new dataset.
 

@@ -244,37 +244,50 @@ def test_the_problem_does_not_claim_to_know_which_half_is_stale():
     assert "counted against the wrong FL id" in message
 
 
-def test_a_reference_outside_the_sheet_is_only_a_notice():
-    """FL-5651 is not in this release. Read as the earlier feature this one
-    follows on from, that is information rather than an error."""
-    rows = [["ID", "Summary", "PBI / Related Item"],
-            ["FL-5786", "Setup PFE flags - Follow-Up",
-             "CS-4294 - FL-5651 Setup PFE: PBI 4 - Implementation"],
-            ["FL-5761", "Blackwell for Pytorch",
-             "CS-4312 - FL-5668 - GPU: Support Blackwell: PBI 1"],
-            ["FL-5773", "Helix microscopes", "CS-4614 - Helix US1"],
-            ["FL-5776", "FIJI bridge", "CS-4759 - FIJI PBI 1"],
-            ["FL-5775", "Deconvolution", "CS-4760 - Deconvolution PBI 0"]]
-    warning = one(rows, "unknown_id_reference")
-    assert warning["severity"] == "notice"
-    assert "2 row(s)" in warning["message"]
-    assert "FL-5651" in warning["message"] and "FL-5668" in warning["message"]
-    assert "they are missing from it" in warning["message"]
-    # the two findings are separate: nothing here points inside the sheet
-    assert "mismatched_id" not in codes(rows)
+OUTSIDE = [["ID", "Summary", "PBI / Related Item"],
+           ["FL-5786", "Setup PFE flags - Follow-Up",
+            "CS-4294 - FL-5651 Setup PFE: PBI 4 - Implementation"],
+           ["FL-5761", "Blackwell for Pytorch",
+            "CS-4312 - FL-5668 - GPU: Support Blackwell: PBI 1"],
+           ["FL-5773", "Helix microscopes", "CS-4614 - Helix US1"],
+           ["FL-5776", "FIJI bridge", "CS-4759 - FIJI PBI 1"],
+           ["FL-5775", "Deconvolution", "CS-4760 - Deconvolution PBI 0"]]
 
 
-def test_the_two_findings_are_reported_separately():
+def references(rows) -> dict | None:
+    """The detection itself, as Traceability calls it."""
+    parsed = parse_workbook(build_workbook(rows))
+    return quality.id_references(parsed.columns[0]["key"], [r.values for r in parsed.rows])
+
+
+def test_a_reference_outside_the_sheet_is_not_a_workbook_warning():
+    """FL-5651 is not in this sheet. That is a question about the release’s
+    scope, answered by Traceability, not a fault in the file — so the load’s
+    warnings say nothing about it."""
+    assert codes(OUTSIDE) == []
+
+
+def test_the_detection_behind_it_is_unchanged():
+    """Both references are still found by the same rule, and nothing here
+    points inside the sheet."""
+    found = references(OUTSIDE)
+    assert found["family"] == "FL"
+    assert found["inside"] == []
+    assert sorted((own, named) for own, named, _text in found["outside"]) == [
+        ("FL-5761", "FL-5668"), ("FL-5786", "FL-5651")]
+
+
+def test_only_the_in_sheet_mismatch_is_a_workbook_warning():
     rows = MISMATCH + [
         ["FL-5786", "Setup PFE flags - Follow-Up",
          "CS-4294 - FL-5651 Setup PFE: PBI 4"],
         ["FL-5817", "Hamamatsu camera", "CS-5206 - PBI1: Hamamatsu C17940-20U"],
         ["FL-5866", "FFmpeg update", "CS-5200 - PBI: Update FFmpeg"],
     ]
-    found = [w["code"] for w in inspect(rows)]
-    assert "mismatched_id" in found and "unknown_id_reference" in found
-    # problem above notice, as the order promises
-    assert found.index("mismatched_id") < found.index("unknown_id_reference")
+    assert codes(rows) == ["mismatched_id"]
+    found = references(rows)
+    assert [(own, named) for own, named, _t in found["inside"]] == [("FL-5777", "FL-5778")]
+    assert [(own, named) for own, named, _t in found["outside"]] == [("FL-5786", "FL-5651")]
 
 
 def test_a_clean_identifier_sheet_says_nothing():

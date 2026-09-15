@@ -177,6 +177,65 @@ async def test_which_data_the_figures_came_from(client, manager_headers, loaded)
     assert body["system"]["latestPeriod"] == SEPTEMBER
 
 
+async def test_a_release_referring_to_nothing_outside_lists_nothing(
+        client, manager_headers, loaded):
+    body = (await client.get(COVERAGE, headers=manager_headers)).json()
+    assert body["outsideReferences"] == []
+    assert body["idMismatches"] == []
+
+
+async def test_a_feature_naming_one_outside_its_workbook_is_listed_here(
+        client, manager_headers, qa_headers, loaded):
+    """What the load used to report as a workbook notice. FL-1002 says it
+    follows on from FL-0950, which the feature workbook does not list: a
+    question about this release’s scope, so Traceability answers it."""
+    (loaded / "feature.xlsx").write_bytes(build_workbook([
+        ["Feature ID", "Feature Name", "Owner"],
+        ["FL-1001", "Camera control rework", "team-a"],
+        ["FL-1002", "Deconvolution modalities, follows FL-0950", "team-b"],
+        ["FL-1003", "Sub array feature", "team-c"],
+    ]))
+    res = await client.post(f"{RELEASE}/snapshots", headers=qa_headers,
+                            json={"period": SEPTEMBER})
+    assert res.status_code == 200, res.text
+
+    body = (await client.get(COVERAGE, headers=manager_headers)).json()
+    assert body["outsideReferences"] == [{
+        "id": "FL-1002", "names": "FL-0950",
+        "text": "Deconvolution modalities, follows FL-0950",
+        "fileName": "feature.xlsx"}]
+    # a reference is never a key: the comparison is exactly what it was
+    assert _ids(body, "covered") == ["FL-1001", "FL-1002"]
+    assert _ids(body, "missing_in_system") == ["FL-1003"]
+    assert _ids(body, "missing_in_feature") == ["FL-2001"]
+
+
+async def test_a_row_naming_another_row_of_its_workbook_is_a_data_quality_entry(
+        client, manager_headers, qa_headers, loaded):
+    """FL-1002's text names FL-1001, another row of the same workbook. The load
+    reports that as a fault in the file; it also decides which feature the
+    row's work belongs to, so Traceability lists it under data quality."""
+    (loaded / "feature.xlsx").write_bytes(build_workbook([
+        ["Feature ID", "Feature Name", "Owner"],
+        ["FL-1001", "Camera control rework", "team-a"],
+        ["FL-1002", "Deconvolution modalities, copied from FL-1001", "team-b"],
+        ["FL-1003", "Sub array feature", "team-c"],
+    ]))
+    res = await client.post(f"{RELEASE}/snapshots", headers=qa_headers,
+                            json={"period": SEPTEMBER})
+    assert res.status_code == 200, res.text
+
+    body = (await client.get(COVERAGE, headers=manager_headers)).json()
+    assert body["idMismatches"] == [{
+        "id": "FL-1002", "names": "FL-1001",
+        "text": "Deconvolution modalities, copied from FL-1001",
+        "fileName": "feature.xlsx"}]
+    assert body["outsideReferences"] == []
+    # listed, never acted on: the match is made on the first column as before
+    assert _ids(body, "covered") == ["FL-1001", "FL-1002"]
+    assert _ids(body, "missing_in_system") == ["FL-1003"]
+
+
 async def test_any_authenticated_role_may_read(client, qa_headers, manager_headers, loaded):
     for headers in (qa_headers, manager_headers):
         assert (await client.get(COVERAGE, headers=headers)).status_code == 200

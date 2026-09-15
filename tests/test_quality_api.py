@@ -12,6 +12,8 @@ first load and its second.
 import pytest
 import pytest_asyncio
 
+from app import db as db_module
+
 from tests.helpers_xlsx import build_workbook
 
 RELEASE = "/api/apps/cellsens/releases/v4-4"
@@ -105,18 +107,40 @@ async def test_a_sheet_that_contradicts_itself_says_so_on_the_load(
     assert by_code["mismatched_id"]["severity"] == "problem"
     assert "FL-5777" in by_code["mismatched_id"]["message"]
     assert "FL-5778" in by_code["mismatched_id"]["message"]
-    assert "unknown_id_reference" in by_code
-    assert by_code["unknown_id_reference"]["severity"] == "notice"
-    assert "FL-5651" in by_code["unknown_id_reference"]["message"]
+    # FL-5786 naming FL-5651 is a question about scope, listed by Traceability
+    assert "unknown_id_reference" not in by_code
 
 
-async def test_the_in_release_mismatch_outranks_the_outside_reference(
+async def test_an_outside_reference_is_left_to_traceability(
         client, qa_headers, folder):
-    """A row pointing at a sibling row is a likely error; one pointing out of
-    the release is information. The order on screen says which is which."""
+    """FL-5786 names FL-5651, which this sheet does not list. Nothing is wrong
+    with the workbook, so the load reports only the in-sheet contradiction."""
     run = await load(client, qa_headers)
     codes = [w["code"] for w in for_file(run, "feature.xlsx")["warnings"]]
-    assert codes.index("mismatched_id") < codes.index("unknown_id_reference")
+    assert codes == ["mismatched_id"]
+
+
+async def test_a_warning_saved_before_the_move_is_no_longer_shown(
+        client, qa_headers, folder):
+    """Snapshots saved while the outside reference was still a workbook notice
+    carry it. Wherever saved warnings are read back out, it is dropped."""
+    run = await load(client, qa_headers)
+    snapshot_id = for_file(run, "feature.xlsx")["snapshotId"]
+    await db_module.get_db().snapshots.update_one(
+        {"_id": snapshot_id},
+        {"$push": {"warnings": {
+            "code": "unknown_id_reference", "severity": "notice",
+            "message": "1 row(s) reference FL ids this sheet does not contain (FL-5651)."}}})
+
+    dash = (await client.get(f"{RELEASE}/layers/feature/dashboard",
+                             headers=qa_headers)).json()
+    assert [w["code"] for w in dash["warnings"]] == ["mismatched_id"]
+    assert [w["code"] for w in dash["snapshot"]["warnings"]] == ["mismatched_id"]
+    history = (await client.get(f"{RELEASE}/layers/feature/snapshots",
+                                headers=qa_headers)).json()
+    assert history
+    assert all(w["code"] != "unknown_id_reference"
+               for snap in history for w in snap["warnings"])
 
 
 async def test_a_contradiction_never_blocks_the_load(client, qa_headers, folder):
@@ -136,8 +160,7 @@ async def test_an_unchanged_reload_still_reports_the_contradiction(
     again = await load(client, qa_headers)
     feature = for_file(again, "feature.xlsx")
     assert feature["created"] is False
-    assert [w["code"] for w in feature["warnings"]] == [
-        "mismatched_id", "unknown_id_reference"]
+    assert [w["code"] for w in feature["warnings"]] == ["mismatched_id"]
 
 
 async def test_a_clean_file_reports_nothing(client, qa_headers, folder):

@@ -38,6 +38,7 @@ from app.models import (
 )
 from app.security import get_current_user, require_role
 from app.services import coverage as cov
+from app.services import quality
 
 router = APIRouter(tags=["traceability"], dependencies=[Depends(get_current_user)])
 
@@ -171,6 +172,39 @@ def _no_ids(result: dict) -> tuple[str, str] | None:
     return None
 
 
+def _references(rows: list[dict]) -> dict[str, list[dict]]:
+    """Feature rows whose text names another feature id, split two ways.
+
+    Found by `quality.id_references`, the rule the load already ran, and per
+    workbook exactly as the load read it: rows grouped by the snapshot they
+    came from, keyed on that file's first column.
+
+    `outside` names an id the row's own workbook does not list. Nothing is
+    wrong with the file; whether that feature belongs in this release is a
+    question about scope, so it is listed here and nowhere else.
+
+    `mismatched` names an id that is another row of the same workbook —
+    FL-5777 reading "CS-4800 - FL-5778 PBI: …". The load reports that as a
+    fault in the file. It is listed here as well because it decides which
+    feature the row's work belongs to, and so what a match on FL-5777 is worth.
+    """
+    by_file: dict[str, list[dict]] = {}
+    for row in rows:
+        by_file.setdefault(row.get("snapshotId", ""), []).append(row)
+
+    out: dict[str, list[dict]] = {"outside": [], "mismatched": []}
+    for group in by_file.values():
+        found = quality.id_references(group[0].get("idColumn") or "",
+                                      [row.get("data") or {} for row in group])
+        if not found:
+            continue
+        name = group[0].get("fileName", "")
+        for kind, half in (("outside", "outside"), ("mismatched", "inside")):
+            out[kind] += [{"id": own, "names": named, "text": text, "fileName": name}
+                          for own, named, text in found[half]]
+    return out
+
+
 async def _compute(app_id: str, release_id: str) -> dict:
     feature, system = await _load_sides(app_id, release_id)
     saved = await repo.get_trace_config(app_id, release_id)
@@ -190,6 +224,9 @@ async def _compute(app_id: str, release_id: str) -> dict:
         return payload
 
     result = cov.build_coverage(feature["rows"], system["rows"], config)
+    references = _references(feature["rows"])
+    result["outsideReferences"] = references["outside"]
+    result["idMismatches"] = references["mismatched"]
     # the per-side read state is an internal of the comparison; the response
     # carries its conclusions, not its working
     empty = _no_ids(result)

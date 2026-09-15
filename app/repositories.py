@@ -187,6 +187,12 @@ async def list_layers(app_id: str, release_id: str) -> list[dict]:
     Row counts describe the newest snapshot only — the pyramid check and the
     layer cards are about what the release holds now, not everything ever
     loaded into it.
+
+    A row is not a unit of testing. One regression row is a spec holding
+    hundreds of cases; one feature row is a feature. So each layer also carries
+    its *test count* — the sum of its files' total-test-count column, the same
+    measure the dashboards fold `Test Count`, `TC count` and `Test Cases` into —
+    and the pyramid compares that wherever both sides of a pair have one.
     """
     db = get_db()
     scope = {"appId": app_id, "releaseId": release_id}
@@ -201,7 +207,9 @@ async def list_layers(app_id: str, release_id: str) -> list[dict]:
                     "loads": {"$sum": 1},
                     "at": {"$first": "$createdAt"},
                     "rowCount": {"$first": "$rowCount"},
-                    "period": {"$first": "$period"}}},
+                    "period": {"$first": "$period"},
+                    "snapshotId": {"$first": "$_id"},
+                    "columns": {"$first": "$columns"}}},
         {"$sort": {"at": -1}},
         {"$group": {"_id": "$_id.layer",
                     "fileCount": {"$sum": 1},
@@ -209,9 +217,12 @@ async def list_layers(app_id: str, release_id: str) -> list[dict]:
                     "recordCount": {"$sum": "$rowCount"},
                     "at": {"$first": "$at"},
                     "period": {"$first": "$period"},
-                    "files": {"$push": "$_id.file"}}},
+                    "files": {"$push": "$_id.file"},
+                    "snapshots": {"$push": {"id": "$snapshotId",
+                                            "columns": "$columns"}}}},
     ])
     latest = {c["_id"]: c async for c in cursor}
+    test_counts = await _layer_test_counts(latest)
     out = []
     for d in docs:
         snap = latest.get(d["layerId"], {})
@@ -222,6 +233,7 @@ async def list_layers(app_id: str, release_id: str) -> list[dict]:
             "desc": d.get("desc", ""),
             "order": d.get("order", 0),
             "recordCount": snap.get("recordCount", 0),
+            "testCount": test_counts.get(d["layerId"]),
             "fileCount": snap.get("fileCount", 0),
             "snapshotCount": snap.get("snapshotCount", 0),
             "latestSnapshotAt": snap.get("at"),
@@ -229,6 +241,57 @@ async def list_layers(app_id: str, release_id: str) -> list[dict]:
             "latestSources": snap.get("files", []),
         })
     return out
+
+
+async def _layer_test_counts(latest: dict[str, dict]) -> dict[str, int | None]:
+    """Each layer's total test cases, or None where it cannot honestly say.
+
+    A file contributes its one total-test-count column — whichever of the
+    recognised labels it uses. A file with none has nothing to give, and a file
+    with two is ambiguous: summing both would count every case twice, and
+    picking one would be a guess. Either way the whole *layer* goes without,
+    because a total over some of its files is a partial figure dressed as the
+    whole, and the pyramid would set it against a complete one.
+
+    One aggregation for every file of every layer.
+    """
+    column_of: dict[str, str] = {}          # snapshot id -> its test-count column
+    complete: dict[str, bool] = {}          # layer id -> every file has one
+    for layer_id, snap in latest.items():
+        complete[layer_id] = True
+        for held in snap.get("snapshots", []):
+            keys = [c["key"] for c in held.get("columns") or []
+                    if c.get("type") == "number"
+                    and prof.measure_identity(c)[0] == prof.TOTAL_TESTS["key"]]
+            if len(keys) == 1:
+                column_of[held["id"]] = keys[0]
+            else:
+                complete[layer_id] = False
+
+    sums: dict[str, float] = {}
+    if column_of:
+        # each snapshot reads its own column: two files of one layer can name
+        # the same measure differently, and that is the case this exists for
+        value = {"$switch": {
+            "branches": [{"case": {"$eq": ["$snapshotId", sid]},
+                          "then": f"$data.{key}"}
+                         for sid, key in column_of.items()],
+            "default": None}}
+        cursor = await get_db().layer_records.aggregate([
+            {"$match": {"snapshotId": {"$in": list(column_of)}}},
+            {"$project": {"snapshotId": 1, "value": value}},
+            # a stray word in a count column is left out, as every total is
+            {"$match": {"value": {"$type": "number"}}},
+            {"$group": {"_id": "$snapshotId", "total": {"$sum": "$value"}}},
+        ])
+        sums = {doc["_id"]: doc["total"] async for doc in cursor}
+
+    return {
+        layer_id: (round(sum(sums.get(held["id"], 0)
+                             for held in latest[layer_id].get("snapshots", [])))
+                   if complete[layer_id] else None)
+        for layer_id in latest
+    }
 
 
 async def list_layer_docs(app_id: str, release_id: str) -> list[dict]:
