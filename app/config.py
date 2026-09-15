@@ -30,3 +30,32 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+class OpenAISettings(BaseSettings):
+    """OpenAI, for the release QA report. No key, no report: the endpoint says so.
+
+    Read from .env BEFORE the environment, unlike everything in `Settings`.
+    OPENAI_API_KEY is a name other tools set machine-wide, and a stale one
+    there silently beat the key this app was given in .env: every report
+    failed with "OpenAI rejected the API key" while the .env key was valid.
+    For these two, the app's own .env is the source of truth. A blank line in
+    .env is skipped, so a key set only in the environment still works.
+
+    The key never reaches the browser.
+    """
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8",
+                                      extra="ignore", env_ignore_empty=True)
+
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5-mini"
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        return init_settings, dotenv_settings, env_settings, file_secret_settings
+
+
+@lru_cache
+def get_openai_settings() -> OpenAISettings:
+    return OpenAISettings()

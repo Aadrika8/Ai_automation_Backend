@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app import db
 from app.config import PLACEHOLDER_SECRET, get_settings
-from app.routers import (apps, auth, benchmark, settings as settings_router,
+from app.routers import (apps, auth, benchmark, reports, settings as settings_router,
                          traceability, users)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
@@ -64,5 +64,5 @@ async def health():
 
 
 for router in (auth.router, apps.router, traceability.router, benchmark.router,
-               settings_router.router, users.router):
+               reports.router, settings_router.router, users.router):
     app.include_router(router, prefix="/api")

@@ -89,6 +89,7 @@ async def delete_app_cascade(app_id: str) -> None:
     await db.snapshots.delete_many({"appId": app_id})
     await db.layers.delete_many({"appId": app_id})
     await db.trace_configs.delete_many({"appId": app_id})
+    await db.qa_reports.delete_many({"appId": app_id})
     await db.releases.delete_many({"appId": app_id})
     await db.apps.delete_one({"_id": app_id})
 
@@ -170,6 +171,7 @@ async def delete_release_cascade(app_id: str, release_id: str) -> None:
     await db.snapshots.delete_many(scope)
     await db.layers.delete_many(scope)
     await db.trace_configs.delete_many(scope)
+    await db.qa_reports.delete_many(scope)
     await db.releases.delete_one({"_id": f"{app_id}:{release_id}"})
     # never leave an application without a release to open
     if await db.releases.count_documents({"appId": app_id, "current": True}) == 0:
@@ -1018,3 +1020,16 @@ async def coverage_rows(app_id: str, release_id: str, layer_id: str) -> dict:
             "idColumns": id_columns,
             "fileNames": {s["_id"]: PurePosixPath(s.get("file", "")).name
                           for s in snapshots}}
+
+
+# --- release QA reports ------------------------------------------------------
+
+
+async def latest_report(app_id: str, release_id: str) -> dict | None:
+    """The most recent report generated for a release, or None."""
+    return await get_db().qa_reports.find_one(
+        {"appId": app_id, "releaseId": release_id}, sort=[("createdAt", -1)])
+
+
+async def insert_report(doc: dict) -> None:
+    await get_db().qa_reports.insert_one(doc)

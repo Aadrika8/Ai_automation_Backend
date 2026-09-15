@@ -57,6 +57,9 @@ async def ensure_indexes(db: AsyncDatabase) -> None:
         await _drop_legacy(db[name])
 
     await db.users.create_index("username", unique=True)
+    # a release's QA reports, newest first
+    await db.qa_reports.create_index(
+        [("appId", ASCENDING), ("releaseId", ASCENDING), ("createdAt", DESCENDING)])
     await db.releases.create_index([("appId", ASCENDING), ("order", ASCENDING)])
     await db.layers.create_index(
         [("appId", ASCENDING), ("releaseId", ASCENDING), ("order", ASCENDING)])
