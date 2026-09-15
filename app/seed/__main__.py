@@ -27,7 +27,7 @@ def seed_db(db: Database) -> dict:
     now = datetime.now(timezone.utc)
     for name in ("users", "apps", "releases", "layers", "snapshots", "layer_records",
                  "settings", "layer_uploads", "tests", "runs",
-                 "reports"):  # last four: pre-snapshot collections
+                 "reports", "qa_reports"):  # tests/runs/reports: pre-snapshot
         db[name].drop()
 
     db.users.insert_many([

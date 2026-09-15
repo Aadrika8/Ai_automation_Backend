@@ -862,3 +862,55 @@ class AutomationTrendResponse(CamelModel):
     points: list[AutomationTrendPoint] = []
     reference: AutomationReference = AutomationReference()
     measured_releases: int = 0
+
+
+# --- release QA report ---------------------------------------------------
+
+
+class ReportPoint(CamelModel):
+    text: str
+    # where the point comes from: pyramid, traceability, automation, layer:<id>
+    sources: list[str] = []
+    # a line the app added from the data because the draft left it out
+    added: bool = False
+
+
+class ReportRisk(ReportPoint):
+    severity: Literal["high", "medium", "low"]
+
+
+class QAReportBody(CamelModel):
+    """What the model writes, in the shape it was asked for."""
+    summary: str
+    findings: list[ReportPoint] = []
+    gaps: list[ReportPoint] = []
+    risks: list[ReportRisk] = []
+    recommendations: list[ReportPoint] = []
+
+
+class SavedReport(CamelModel):
+    id: str
+    created_at: datetime
+    created_by: str = ""
+    model: str = ""
+    release_name: str = ""
+    # the month the release's data describes, "2026-09"
+    period: str = ""
+    # layer id -> name, so a `layer:<id>` source can be labelled and linked
+    layer_names: dict[str, str] = {}
+    report: QAReportBody
+    # figures in the report that the facts it was written from do not hold
+    unverified: list[str] = []
+    # what every report must cover and this one left out, as sentences
+    not_covered: list[str] = []
+    # what the draft left out and the app added from the data
+    added_from_data: list[str] = []
+
+
+class ReportResponse(CamelModel):
+    # false when no OpenAI key is configured — the screen says why
+    configured: bool = False
+    model: str = ""
+    report: SavedReport | None = None
+    # true when the release's data has changed since the report was written
+    stale: bool = False
