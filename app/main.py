@@ -8,7 +8,8 @@ from fastapi.responses import JSONResponse
 
 from app import db
 from app.config import PLACEHOLDER_SECRET, get_settings
-from app.routers import apps, auth, reports, runs, settings as settings_router, tests, users
+from app.routers import (apps, auth, benchmark, reports, settings as settings_router,
+                         traceability, users)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
 log = logging.getLogger("qi")
@@ -62,5 +63,6 @@ async def health():
     return {"status": "ok"}
 
 
-for router in (auth.router, apps.router, tests.router, runs.router, settings_router.router, users.router, reports.router):
+for router in (auth.router, apps.router, traceability.router, benchmark.router,
+               reports.router, settings_router.router, users.router):
     app.include_router(router, prefix="/api")
