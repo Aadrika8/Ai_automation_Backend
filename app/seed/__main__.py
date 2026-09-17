@@ -12,6 +12,7 @@ To keep the data already in a database, migrate it instead:
 `python -m app.migrate` moves a pre-release database onto this schema.
 Also drops the legacy fake-data collections (tests, runs, reports).
 """
+import secrets
 from datetime import datetime, timezone
 
 from pymongo import ASCENDING, DESCENDING, MongoClient
@@ -23,8 +24,28 @@ from app.layer_defaults import DEFAULT_LAYERS, default_layer_docs
 from app.seed.fixtures import APPS, DEFAULT_SETTINGS, RELEASES, USERS
 
 
+def _initial_passwords() -> tuple[dict[str, str], dict[str, str]]:
+    """Password per login account: from SEED_*_PASSWORD when set, otherwise a
+    random one. Returns (all passwords, the generated subset) so the caller
+    can print the generated ones exactly once."""
+    settings = get_settings()
+    chosen: dict[str, str] = {}
+    generated: dict[str, str] = {}
+    for u in USERS:
+        field = u["passwordSetting"]
+        if not field:
+            continue
+        value = (getattr(settings, field) or "").strip()
+        if not value:
+            value = secrets.token_urlsafe(12)
+            generated[u["username"]] = value
+        chosen[u["username"]] = value
+    return chosen, generated
+
+
 def seed_db(db: Database) -> dict:
     now = datetime.now(timezone.utc)
+    passwords, generated = _initial_passwords()
     for name in ("users", "apps", "releases", "layers", "snapshots", "layer_records",
                  "settings", "layer_uploads", "tests", "runs",
                  "reports", "qa_reports"):  # tests/runs/reports: pre-snapshot
@@ -33,8 +54,9 @@ def seed_db(db: Database) -> dict:
     db.users.insert_many([
         {
             "username": u["username"], "name": u["name"], "role": u["role"],
-            "passwordHash": hash_password(u["password"]) if u["password"] else None,
-            "lastActive": now if u["password"] else None,
+            "passwordHash": (hash_password(passwords[u["username"]])
+                             if u["username"] in passwords else None),
+            "lastActive": now if u["username"] in passwords else None,
         }
         for u in USERS
     ])
@@ -66,14 +88,20 @@ def seed_db(db: Database) -> dict:
 
     return {"apps": len(APPS), "releases": len(RELEASES),
             "layers": len(RELEASES) * len(DEFAULT_LAYERS),
-            "users": len(USERS), "records": 0}
+            "users": len(USERS), "records": 0, "generatedPasswords": generated}
 
 
 def main() -> None:
     settings = get_settings()
     client = MongoClient(settings.mongo_uri)
     counts = seed_db(client[settings.mongo_db])
+    generated = counts.pop("generatedPasswords")
     print(f"seeded {settings.mongo_db}: " + " ".join(f"{k}={v}" for k, v in counts.items()))
+    if generated:
+        print("No SEED_*_PASSWORD set for these accounts, so a random password was "
+              "generated. It is shown once; set the variables in .env to choose your own.")
+        for username, password in generated.items():
+            print(f"  {username}: {password}")
     client.close()
 
 

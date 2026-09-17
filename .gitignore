@@ -3,3 +3,6 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Excel workbooks are read from settings.excelRoot, outside the repo. Never commit test data.
+/New folder/

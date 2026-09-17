@@ -25,6 +25,12 @@ class Settings(BaseSettings):
         "http://localhost:5175",
         "http://localhost:5199",
     ]
+    # Initial passwords for the three login accounts `python -m app.seed`
+    # creates. Left blank, the seed generates a random one per account and
+    # prints it once; nothing is baked into the code.
+    seed_admin_password: str = ""
+    seed_qa_password: str = ""
+    seed_manager_password: str = ""
 
 
 @lru_cache

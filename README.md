@@ -296,7 +296,7 @@ In Swagger UI, click **Authorize** and paste a token from `POST /api/auth/login`
 
 ```bash
 TOKEN=$(curl -s localhost:8000/api/auth/login -H 'Content-Type: application/json' \
-  -d '{"username":"qa","password":"qa123"}' | python -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+  -d '{"username":"qa","password":"<your SEED_QA_PASSWORD>"}' | python -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 
 # what the release's folder currently holds, and which layer each file feeds
 curl -H "Authorization: Bearer $TOKEN" \
@@ -344,7 +344,10 @@ own account. Deleting a user does not revoke tokens already issued to them
 
 Unknown app/release/layer ids → 404; ids are lowercase slugs
 (`^[a-z0-9][a-z0-9-]*$`), so a release named `v4.3` is addressed as `v4-3`.
-Demo accounts: `admin/admin123`, `qa/qa123`, `manager/manager123`.
+Login accounts: `admin`, `qa`, `manager`. Their initial passwords come from
+`SEED_ADMIN_PASSWORD`, `SEED_QA_PASSWORD` and `SEED_MANAGER_PASSWORD` in `.env`
+when `python -m app.seed` runs; left blank, the seed generates one per account
+and prints it once.
 
 ## Tests
 

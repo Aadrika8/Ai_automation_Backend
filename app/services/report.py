@@ -43,9 +43,11 @@ WARNING_MEANINGS = {
     "no_header": "the sheet has no header row, so its columns are only numbered",
 }
 
-INSTRUCTIONS = """You are a senior QA lead. Write a concise, professional quality report on one
-software release for engineering and QA managers at a life-science microscopy
-software company (the product is cellSens).
+# The product is named per call — see `instructions()` — so a report is always
+# written about the application the facts describe, never about a fixed one.
+INSTRUCTIONS_TEMPLATE = """You are a senior QA lead. Write a concise, professional quality report on one
+software release of the product {product} for the engineering and QA managers
+responsible for it.
 
 Write ONLY from the facts in the JSON you are given.
 - Use every figure exactly as the facts give it (53.8 stays 53.8, never 54),
@@ -57,8 +59,8 @@ Write ONLY from the facts in the JSON you are given.
 - Compare nothing with the automation reference range except automation
   coverage itself.
 - If something is not in the facts, do not mention it and do not guess at it.
-- Name features by id and title where it helps, for example
-  "FL-5761 (Support Blackwell Technology for Deep Learning)".
+- Name features by id and title where it helps, in the form
+  "<id> (<title>)", using only ids and titles that appear in the facts.
 - Plain, specific language. No filler and no marketing tone.
 
 Sections:
@@ -112,6 +114,13 @@ How to read the facts:
   reference range is a cross-industry survey estimate, for orientation only.
 - Each file carries its data-quality warnings, by code and severity:
 """ + "\n".join(f"  - {code}: {meaning}" for code, meaning in WARNING_MEANINGS.items())
+
+
+def instructions(product: str) -> str:
+    """The system prompt for one report, naming the application it is about."""
+    name = (product or "").strip() or "under review"
+    return INSTRUCTIONS_TEMPLATE.replace("{product}", name)
+
 
 _POINT = {
     "type": "object",

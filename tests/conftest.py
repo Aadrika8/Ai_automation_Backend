@@ -1,6 +1,10 @@
 import os
 
 os.environ["MONGO_DB"] = "qi_test"  # must be set before app.config is imported
+# The seed reads initial passwords from the environment; the tests pick theirs.
+os.environ["SEED_ADMIN_PASSWORD"] = "admin123"
+os.environ["SEED_QA_PASSWORD"] = "qa123"
+os.environ["SEED_MANAGER_PASSWORD"] = "manager123"
 
 import pytest
 import pytest_asyncio

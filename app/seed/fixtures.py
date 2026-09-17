@@ -3,12 +3,18 @@ and default settings. Testing layers are not defined here — every release gets
 the global pyramid from `app.layer_defaults`. No test data is seeded either;
 records arrive via Excel upload or a folder sync."""
 
+# `passwordSetting` names the field of `app.config.Settings` (and so the
+# SEED_*_PASSWORD variable in .env) the account's initial password is read
+# from. No password is written here. Accounts without one cannot sign in.
 USERS = [
-    {"username": "admin", "password": "admin123", "name": "Aadrika Sharma", "role": "admin"},
-    {"username": "qa", "password": "qa123", "name": "Rahul Verma", "role": "qa"},
-    {"username": "manager", "password": "manager123", "name": "Priya Nair", "role": "manager"},
-    {"username": "qa2", "password": None, "name": "Meera Iyer", "role": "qa"},
-    {"username": "manager2", "password": None, "name": "Vikram Rao", "role": "manager"},
+    {"username": "admin", "passwordSetting": "seed_admin_password",
+     "name": "Aadrika Sharma", "role": "admin"},
+    {"username": "qa", "passwordSetting": "seed_qa_password",
+     "name": "Rahul Verma", "role": "qa"},
+    {"username": "manager", "passwordSetting": "seed_manager_password",
+     "name": "Priya Nair", "role": "manager"},
+    {"username": "qa2", "passwordSetting": None, "name": "Meera Iyer", "role": "qa"},
+    {"username": "manager2", "passwordSetting": None, "name": "Vikram Rao", "role": "manager"},
 ]
 
 APPS = [

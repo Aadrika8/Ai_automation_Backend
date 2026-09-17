@@ -52,7 +52,7 @@ class OpenAIReportWriter:
         try:
             response = await self._client.responses.create(
                 model=self.model,
-                instructions=rpt.INSTRUCTIONS,
+                instructions=rpt.instructions(facts.get("application", "")),
                 input="Facts (JSON):\n" + json.dumps(facts, ensure_ascii=False, indent=1),
                 text={"format": {"type": "json_schema", "name": "qa_report",
                                  "schema": rpt.REPORT_SCHEMA, "strict": True}},
